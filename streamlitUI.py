@@ -648,33 +648,191 @@ if query:
                 # 如果找到了关键字，先显示包含关键字的上下文
                 if keyword_info["has_keywords"]:
                     st.markdown("**🔍 关键字匹配位置:**", unsafe_allow_html=True)
-                    st.markdown(keyword_info["context_text"], unsafe_allow_html=False)
+                    
+                    # 使用自定义Markdown渲染函数或Streamlit的markdown组件
+                    if MARKDOWN_IT_AVAILABLE:
+                        # 如果可用，使用自定义的Markdown渲染函数
+                        rendered_html = render_markdown_with_highlight(keyword_info["context_text"], keywords)
+                        content_height = max(300, len(keyword_info["context_text"].split('\n')) * 20)
+                        styled_html = f"""
+                        <style>
+                        .markdown-content {{
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                            line-height: 1.6;
+                            padding: 10px;
+                            overflow-y: auto;
+                            max-height: 100%;
+                            border-radius: 5px;
+                        }}
+                        .markdown-content pre {{
+                            background-color: #f5f5f5;
+                            padding: 10px;
+                            border-radius: 5px;
+                            overflow-x: auto;
+                        }}
+                        </style>
+                        <div class="markdown-content">
+                        {rendered_html}
+                        </div>
+                        """
+                        st.components.v1.html(styled_html, height=content_height, scrolling=True)
+                    else:
+                        # 否则使用Streamlit的markdown组件
+                        st.markdown(keyword_info["context_text"], unsafe_allow_html=True)
                     
                     # 添加查看完整内容的选项
                     if st.button("查看完整内容", key=f"full_{raw_path}"):
                         st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
                         if full_file_content is not None:
-                            st.markdown(full_file_content, unsafe_allow_html=False)
+                            if MARKDOWN_IT_AVAILABLE:
+                                rendered_html = render_markdown_with_highlight(full_file_content, keywords)
+                                content_height = max(500, len(full_file_content.split('\n')) * 20)
+                                styled_html = f"""
+                                <style>
+                                .markdown-content {{
+                                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                                    line-height: 1.6;
+                                    padding: 10px;
+                                    overflow-y: auto;
+                                    max-height: 100%;
+                                    border-radius: 5px;
+                                }}
+                                .markdown-content pre {{
+                                    background-color: #f5f5f5;
+                                    padding: 10px;
+                                    border-radius: 5px;
+                                    overflow-x: auto;
+                                }}
+                                </style>
+                                <div class="markdown-content">
+                                {rendered_html}
+                                </div>
+                                """
+                                st.components.v1.html(styled_html, height=content_height, scrolling=True)
+                            else:
+                                st.markdown(full_file_content, unsafe_allow_html=True)
                         else:
-                            st.markdown(keyword_info["full_text"], unsafe_allow_html=False)
+                            if MARKDOWN_IT_AVAILABLE:
+                                rendered_html = render_markdown_with_highlight(keyword_info["full_text"], keywords)
+                                content_height = max(500, len(keyword_info["full_text"].split('\n')) * 20)
+                                styled_html = f"""
+                                <style>
+                                .markdown-content {{
+                                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                                    line-height: 1.6;
+                                    padding: 10px;
+                                    overflow-y: auto;
+                                    max-height: 100%;
+                                    border-radius: 5px;
+                                }}
+                                .markdown-content pre {{
+                                    background-color: #f5f5f5;
+                                    padding: 10px;
+                                    border-radius: 5px;
+                                    overflow-x: auto;
+                                }}
+                                </style>
+                                <div class="markdown-content">
+                                {rendered_html}
+                                </div>
+                                """
+                                st.components.v1.html(styled_html, height=content_height, scrolling=True)
+                            else:
+                                st.markdown(keyword_info["full_text"], unsafe_allow_html=True)
                 elif content_has_keywords and full_file_content is not None:
                     # 如果原始文件内容被截断，提供查看完整内容的选项
-                    st.markdown(content, unsafe_allow_html=False)
+                    if MARKDOWN_IT_AVAILABLE:
+                        rendered_html = render_markdown_with_highlight(content, keywords)
+                        content_height = max(300, len(content.split('\n')) * 20)
+                        styled_html = f"""
+                        <style>
+                        .markdown-content {{
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                            line-height: 1.6;
+                            padding: 10px;
+                            overflow-y: auto;
+                            max-height: 100%;
+                            border-radius: 5px;
+                        }}
+                        .markdown-content pre {{
+                            background-color: #f5f5f5;
+                            padding: 10px;
+                            border-radius: 5px;
+                            overflow-x: auto;
+                        }}
+                        </style>
+                        <div class="markdown-content">
+                        {rendered_html}
+                        </div>
+                        """
+                        st.components.v1.html(styled_html, height=content_height, scrolling=True)
+                    else:
+                        st.markdown(content, unsafe_allow_html=True)
                     
                     # 添加查看完整内容的选项
                     if st.button("查看完整内容", key=f"full_{raw_path}"):
                         st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
-                        st.markdown(full_file_content, unsafe_allow_html=False)
+                        if MARKDOWN_IT_AVAILABLE:
+                            rendered_html = render_markdown_with_highlight(full_file_content, keywords)
+                            content_height = max(500, len(full_file_content.split('\n')) * 20)
+                            styled_html = f"""
+                            <style>
+                            .markdown-content {{
+                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                                line-height: 1.6;
+                                padding: 10px;
+                                overflow-y: auto;
+                                max-height: 100%;
+                                border-radius: 5px;
+                            }}
+                            .markdown-content pre {{
+                                background-color: #f5f5f5;
+                                padding: 10px;
+                                border-radius: 5px;
+                                overflow-x: auto;
+                            }}
+                            </style>
+                            <div class="markdown-content">
+                            {rendered_html}
+                            </div>
+                            """
+                            st.components.v1.html(styled_html, height=content_height, scrolling=True)
+                        else:
+                            st.markdown(full_file_content, unsafe_allow_html=True)
                 else:
                     # 如果没有找到关键字，直接显示完整内容
-                    st.markdown(content, unsafe_allow_html=False)
+                    if MARKDOWN_IT_AVAILABLE:
+                        rendered_html = render_markdown_with_highlight(content, keywords)
+                        content_height = max(300, len(content.split('\n')) * 20)
+                        styled_html = f"""
+                        <style>
+                        .markdown-content {{
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                            line-height: 1.6;
+                            padding: 10px;
+                            overflow-y: auto;
+                            max-height: 100%;
+                            border-radius: 5px;
+                        }}
+                        .markdown-content pre {{
+                            background-color: #f5f5f5;
+                            padding: 10px;
+                            border-radius: 5px;
+                            overflow-x: auto;
+                        }}
+                        </style>
+                        <div class="markdown-content">
+                        {rendered_html}
+                        </div>
+                        """
+                        st.components.v1.html(styled_html, height=content_height, scrolling=True)
+                    else:
+                        st.markdown(content, unsafe_allow_html=True)
                 
                 # 如果需要高亮关键词，添加JavaScript
-                if highlight_keywords and keywords:
-                    # 创建一个唯一的ID
+                if highlight_keywords and keywords and not MARKDOWN_IT_AVAILABLE:
                     content_id = hashlib.md5(content.encode()).hexdigest()
                     
-                    # 添加关键词高亮的JavaScript
                     highlight_js = f"""
                     <script>
                     document.addEventListener('DOMContentLoaded', function() {{
@@ -727,7 +885,6 @@ if query:
                     </script>
                     """
                     
-                    # 添加JavaScript
                     st.components.v1.html(highlight_js, height=0)
             
             # 添加分隔线
