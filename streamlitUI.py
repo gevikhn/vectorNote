@@ -12,6 +12,8 @@ import urllib.parse
 from pathlib import Path
 import torch
 import os
+import streamlit.components.v1 as components
+import hashlib
 
 # 配置
 COLLECTION_NAME = "obsidian_notes"
@@ -253,20 +255,81 @@ if query:
 
         keywords = list(set(re.findall(r'\w+', query.lower())))
 
-        def highlight(text: str):
-            for word in keywords:
-                if len(word) >= 2:
-                    text = re.sub(fr'({re.escape(word)})', r'<span class="highlight">\1</span>', text, flags=re.IGNORECASE)
-            return text
-
         for hit in results:
             raw_path = hit.payload["source"]
             content = hit.payload["text"]
-            highlighted = highlight(content)
-
+            
+            # 尝试读取原始文件以获取更完整的内容
+            try:
+                if os.path.exists(raw_path):
+                    with open(raw_path, 'r', encoding='utf-8') as f:
+                        full_content = f.read()
+                    
+                    # 提取文件的主要内容（最多显示前50行有意义的内容）
+                    lines = full_content.split('\n')
+                    # 去除空行
+                    meaningful_lines = [line for line in lines if line.strip()]
+                    
+                    # 提取前50行非空内容
+                    if len(meaningful_lines) > 50:
+                        preview_lines = meaningful_lines[:50]
+                        preview_text = '\n'.join(preview_lines)
+                        preview_text += "\n...(更多内容)"
+                    else:
+                        preview_text = full_content
+                    
+                    # 使用完整内容替换向量数据库中的片段
+                    content = preview_text
+            except Exception as e:
+                st.warning(f"读取原始文件时出错: {str(e)}，将使用向量数据库中的内容片段")
+            
+            # 检查并修复可能的Markdown截断问题
+            def fix_truncated_markdown(text):
+                # 修复可能被截断的图片链接
+                img_pattern = r'!\[.*?\]\([^\)]*$'
+                if re.search(img_pattern, text):
+                    text += ")"  # 添加缺失的右括号
+                
+                # 修复可能被截断的链接
+                link_pattern = r'\[.*?\]\([^\)]*$'
+                if re.search(link_pattern, text):
+                    text += ")"  # 添加缺失的右括号
+                
+                # 修复可能被截断的代码块
+                if text.count("```") % 2 != 0:
+                    text += "\n```"  # 添加缺失的代码块结束标记
+                
+                # 修复可能被截断的强调标记
+                if text.count("**") % 2 != 0:
+                    text += "**"  # 添加缺失的强调结束标记
+                
+                if text.count("*") % 2 != 0:
+                    text += "*"  # 添加缺失的斜体结束标记
+                
+                if text.count("__") % 2 != 0:
+                    text += "__"  # 添加缺失的下划线结束标记
+                
+                if text.count("_") % 2 != 0:
+                    text += "_"  # 添加缺失的下划线结束标记
+                
+                return text
+            
+            # 修复可能的截断问题
+            content = fix_truncated_markdown(content)
+            
+            # 高亮关键词
+            highlighted_content = content
+            for word in keywords:
+                if len(word) >= 2:
+                    highlighted_content = re.sub(
+                        fr'\b({re.escape(word)})\b', 
+                        r'<span style="background-color: yellow; font-weight: bold;">\1</span>', 
+                        highlighted_content, 
+                        flags=re.IGNORECASE
+                    )
+            
             # 文档跳转链接
             abs_path = Path(raw_path).resolve()
-            local_url = f"file://{urllib.parse.quote(str(abs_path))}"
 
             # 添加文件路径和打开按钮
             col1, col2 = st.columns([4, 1])
@@ -278,10 +341,40 @@ if query:
                     success, error = open_file_with_app(str(abs_path))
                     if not success:
                         st.error(f"打开失败: {error}")
-                
-            st.markdown(f"<div style='margin-bottom:12px'>{highlighted}</div>", unsafe_allow_html=True)
-            st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)
             
+            # 使用Streamlit的expander组件显示内容
+            with st.expander("📝 笔记内容", expanded=True):
+                # 添加自定义CSS样式
+                st.markdown("""
+                <style>
+                .markdown-content img {
+                    max-width: 100%;
+                    height: auto;
+                }
+                .markdown-content pre {
+                    background-color: #f6f8fa;
+                    border-radius: 3px;
+                    padding: 16px;
+                    overflow: auto;
+                }
+                .markdown-content code {
+                    font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+                    font-size: 85%;
+                    padding: 0.2em 0.4em;
+                    background-color: rgba(27, 31, 35, 0.05);
+                    border-radius: 3px;
+                }
+                .markdown-content pre code {
+                    background-color: transparent;
+                    padding: 0;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+                
+                # 使用div包装内容以应用样式
+                st.markdown(f'<div class="markdown-content">{highlighted_content}</div>', unsafe_allow_html=True)
+            
+            st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)
             st.markdown("---")
     else:
         st.warning("没有找到相关内容。")

@@ -263,10 +263,48 @@ def search_notes(query: str):
         # 提取文件名作为额外显示
         filename = Path(source).name
         
+        # 显示结果标题
         console.print(f"\n[bold green]结果 {i} (相似度: {score:.2f})[/bold green]")
         console.print(f"[bold cyan]文件: {filename}[/bold cyan]")
-        console.print(Markdown(text))
-        console.print(f"[dim]来源: {source}[/dim]\n")
+        console.print("\n")
+        
+        # 尝试读取原始文件内容
+        content_to_display = ""
+        try:
+            if os.path.exists(source):
+                with open(source, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # 提取文件的前30行非空内容
+                lines = content.split('\n')
+                non_empty_lines = []
+                for line in lines:
+                    if line.strip():
+                        non_empty_lines.append(line)
+                    if len(non_empty_lines) >= 30:
+                        break
+                
+                if non_empty_lines:
+                    content_to_display = '\n'.join(non_empty_lines)
+                    if len(lines) > 30:
+                        content_to_display += "\n..."
+                else:
+                    content_to_display = text
+            else:
+                content_to_display = text
+        except Exception:
+            # 如果读取失败，使用向量数据库中的文本
+            content_to_display = text
+        
+        """ # 逐行显示内容，避免使用Markdown渲染
+        for line in content_to_display.split('\n'):
+            # 过滤掉不可打印字符
+            clean_line = ''.join(c for c in line if c.isprintable() or c in [' ', '\t'])
+            if clean_line.strip():
+                console.print(clean_line) """
+        console.print(Markdown(content_to_display))
+        
+        console.print(f"\n[dim]来源: {source}[/dim]")
         console.print("─" * 80)
 
 def main():
