@@ -355,34 +355,92 @@ def enhance_query(query: str):
 
 # 检查并修复可能的Markdown截断问题
 def fix_truncated_markdown(text):
-    # 修复可能被截断的图片链接
-    img_pattern = r'!\[.*?\]\([^\)]*$'
-    if re.search(img_pattern, text):
-        text += ")"  # 添加缺失的右括号
+    """
+    检查并修复可能的Markdown截断问题
+    """
+    # 检查输入是否为字符串类型
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except Exception:
+            return "错误：无法显示内容，内容格式不正确"
     
-    # 修复可能被截断的链接
-    link_pattern = r'\[.*?\]\([^\)]*$'
-    if re.search(link_pattern, text):
-        text += ")"  # 添加缺失的右括号
+    # 修复未闭合的代码块
+    code_block_count = text.count("```")
+    if code_block_count % 2 != 0:
+        text += "\n```"
     
-    # 修复可能被截断的代码块
-    if text.count("```") % 2 != 0:
-        text += "\n```"  # 添加缺失的代码块结束标记
+    # 修复未闭合的行内代码
+    inline_code_count = text.count("`") - code_block_count * 3
+    if inline_code_count % 2 != 0:
+        text += "`"
     
-    # 修复可能被截断的强调标记
-    if text.count("**") % 2 != 0:
-        text += "**"  # 添加缺失的强调结束标记
+    # 修复未闭合的粗体和斜体
+    bold_count = text.count("**")
+    if bold_count % 2 != 0:
+        text += "**"
     
-    if text.count("*") % 2 != 0:
-        text += "*"  # 添加缺失的斜体结束标记
-    
-    if text.count("__") % 2 != 0:
-        text += "__"  # 添加缺失的下划线结束标记
-    
-    if text.count("_") % 2 != 0:
-        text += "_"  # 添加缺失的下划线结束标记
+    italic_count = text.count("*") - bold_count * 2
+    if italic_count % 2 != 0:
+        text += "*"
     
     return text
+
+# 定位关键字在文本中的位置
+def locate_keywords_in_text(text, keywords, context_lines=5):
+    """
+    在文本中定位关键字，并返回包含关键字的上下文
+    
+    参数:
+        text (str): 要搜索的文本
+        keywords (list): 关键字列表
+        context_lines (int): 关键字前后要显示的行数
+        
+    返回:
+        dict: 包含关键字位置和上下文的字典
+    """
+    if not isinstance(text, str) or not keywords:
+        return {"full_text": text, "has_keywords": False}
+    
+    # 将文本分割成行
+    lines = text.split('\n')
+    
+    # 查找包含关键字的行
+    keyword_lines = []
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        if any(keyword.lower() in line_lower for keyword in keywords if len(keyword) >= 2):
+            keyword_lines.append(i)
+    
+    # 如果没有找到关键字，返回原始文本
+    if not keyword_lines:
+        return {"full_text": text, "has_keywords": False}
+    
+    # 获取第一个关键字出现的位置
+    first_keyword_line = keyword_lines[0]
+    
+    # 计算要显示的行范围
+    start_line = max(0, first_keyword_line - context_lines)
+    end_line = min(len(lines), first_keyword_line + context_lines + 1)
+    
+    # 提取包含关键字的上下文
+    context_text = '\n'.join(lines[start_line:end_line])
+    
+    # 如果不是从第一行开始，添加提示
+    prefix = "..." if start_line > 0 else ""
+    suffix = "..." if end_line < len(lines) else ""
+    
+    # 组合最终文本
+    final_text = f"{prefix}\n{context_text}\n{suffix}" if prefix or suffix else context_text
+    
+    return {
+        "full_text": text,
+        "context_text": final_text,
+        "has_keywords": True,
+        "keyword_line": first_keyword_line,
+        "start_line": start_line,
+        "end_line": end_line
+    }
 
 # 搜索逻辑
 if query:
@@ -512,21 +570,64 @@ if query:
                         
                         # 提取文件的主要内容
                         lines = full_content.split('\n')
-                        # 去除空行
-                        meaningful_lines = [line for line in lines if line.strip()]
                         
-                        # 根据用户设置的最大显示行数提取内容
-                        if len(meaningful_lines) > max_display_lines:
-                            preview_lines = meaningful_lines[:max_display_lines]
+                        # 查找包含关键字的行
+                        keyword_lines = []
+                        for i, line in enumerate(lines):
+                            line_lower = line.lower()
+                            if any(keyword.lower() in line_lower for keyword in keywords if len(keyword) >= 2):
+                                keyword_lines.append(i)
+                        
+                        # 如果找到了包含关键字的行，优先显示这部分内容
+                        if keyword_lines and len(keyword_lines) > 0:
+                            # 获取第一个关键字出现的位置
+                            first_keyword_line = keyword_lines[0]
+                            
+                            # 计算要显示的行范围
+                            context_lines = 15  # 关键字前后显示的行数
+                            start_line = max(0, first_keyword_line - context_lines)
+                            end_line = min(len(lines), first_keyword_line + context_lines + 1)
+                            
+                            # 提取包含关键字的上下文
+                            preview_lines = lines[start_line:end_line]
                             preview_text = '\n'.join(preview_lines)
-                            preview_text += "\n...(更多内容)"
+                            
+                            # 添加提示，表明内容被截断
+                            if start_line > 0:
+                                preview_text = "...(前面还有内容)\n" + preview_text
+                            if end_line < len(lines):
+                                preview_text += "\n...(后面还有内容)"
+                            
+                            # 标记此内容包含关键字
+                            content = preview_text
+                            content_has_keywords = True
+                            # 保存完整内容以便后续显示
+                            full_file_content = full_content
                         else:
-                            preview_text = full_content
-                        
-                        # 使用完整内容替换向量数据库中的片段
-                        content = preview_text
+                            # 如果没有找到关键字，按照原来的方式处理
+                            # 去除空行
+                            meaningful_lines = [line for line in lines if line.strip()]
+                            
+                            # 根据用户设置的最大显示行数提取内容
+                            if len(meaningful_lines) > max_display_lines:
+                                preview_lines = meaningful_lines[:max_display_lines]
+                                preview_text = '\n'.join(preview_lines)
+                                preview_text += "\n...(更多内容)"
+                                content_has_keywords = True  # 内容被截断，提供查看完整内容的选项
+                                full_file_content = full_content
+                            else:
+                                preview_text = full_content
+                                content_has_keywords = False
+                                full_file_content = None
+                            
+                            content = preview_text
                 except Exception as e:
                     st.warning(f"读取原始文件时出错: {str(e)}，将使用向量数据库中的内容片段")
+                    content_has_keywords = False
+                    full_file_content = None
+            else:
+                content_has_keywords = False
+                full_file_content = None
             
             # 检查并修复可能的Markdown截断问题
             if apply_markdown_fix:
@@ -539,11 +640,34 @@ if query:
                 except Exception:
                     content = "错误：无法显示内容，内容格式不正确"
             
+            # 定位关键字并获取上下文
+            keyword_info = locate_keywords_in_text(content, keywords, context_lines=10)
+            
             # 使用Streamlit的expander组件显示内容
             with st.expander("📝 笔记内容", expanded=True):
-                # 直接使用Streamlit的Markdown渲染功能，避免自定义处理
-                # 对于关键词高亮，我们将在渲染后通过JavaScript处理
-                st.markdown(content, unsafe_allow_html=False)
+                # 如果找到了关键字，先显示包含关键字的上下文
+                if keyword_info["has_keywords"]:
+                    st.markdown("**🔍 关键字匹配位置:**", unsafe_allow_html=True)
+                    st.markdown(keyword_info["context_text"], unsafe_allow_html=False)
+                    
+                    # 添加查看完整内容的选项
+                    if st.button("查看完整内容", key=f"full_{raw_path}"):
+                        st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
+                        if full_file_content is not None:
+                            st.markdown(full_file_content, unsafe_allow_html=False)
+                        else:
+                            st.markdown(keyword_info["full_text"], unsafe_allow_html=False)
+                elif content_has_keywords and full_file_content is not None:
+                    # 如果原始文件内容被截断，提供查看完整内容的选项
+                    st.markdown(content, unsafe_allow_html=False)
+                    
+                    # 添加查看完整内容的选项
+                    if st.button("查看完整内容", key=f"full_{raw_path}"):
+                        st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
+                        st.markdown(full_file_content, unsafe_allow_html=False)
+                else:
+                    # 如果没有找到关键字，直接显示完整内容
+                    st.markdown(content, unsafe_allow_html=False)
                 
                 # 如果需要高亮关键词，添加JavaScript
                 if highlight_keywords and keywords:
