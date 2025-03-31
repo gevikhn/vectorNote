@@ -1,19 +1,58 @@
-import sys
 import os
-import torch
+import sys
 from pathlib import Path
+
+# === 配置项 ===
+COLLECTION_NAME = "obsidian_notes"
+MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 必须与生成向量时使用的模型一致
+TOP_K = 8  # 增加返回结果数量
+SCORE_THRESHOLD = 0.45  # 降低相似度阈值，增加召回率
+ROOT_DIR = Path("D:/Notes")  # 笔记根目录
+# 离线模式配置
+OFFLINE_MODE = False  # 设置为True启用离线模式，不会检查模型更新
+# 本地模型路径（如果有）
+LOCAL_MODEL_PATH = "./models/bge-large-zh"  # 如果有本地模型，指定路径
+
+# 处理命令行参数
+import argparse
+parser = argparse.ArgumentParser(description="搜索向量化的笔记")
+parser.add_argument("query", nargs="?", help="搜索关键词")
+parser.add_argument("--offline", action="store_true", help="启用离线模式，使用本地缓存模型")
+args = parser.parse_args()
+
+if args.offline:
+    OFFLINE_MODE = True
+    print("已启用离线模式")
+
+# 设置离线模式环境变量（必须在导入模块前设置）
+if OFFLINE_MODE:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = "./models"  # 指定模型缓存目录
+    print("已设置离线模式环境变量")
+    
+    # 检查本地模型目录是否存在
+    if LOCAL_MODEL_PATH and os.path.exists(LOCAL_MODEL_PATH):
+        print(f"使用本地模型: {LOCAL_MODEL_PATH}")
+        MODEL_NAME = LOCAL_MODEL_PATH
+    else:
+        print(f"警告: 未找到本地模型 {LOCAL_MODEL_PATH}")
+        print("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+
+# 导入其他模块
+import torch
+import hashlib
+import uuid
+import json
+from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 from rich.console import Console
 from rich.markdown import Markdown
 import re
 
-# === 配置项 ===
-COLLECTION_NAME = "obsidian_notes"
-MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 与 scan_and_embed_notes.py 保持一致
-TOP_K = 8  # 增加返回结果数量
-SCORE_THRESHOLD = 0.45  # 降低相似度阈值，增加召回率
-ROOT_DIR = Path("D:/Notes")  # 笔记根目录
+console = Console()
 
 # === 检测CUDA可用性 ===
 def check_cuda_availability():
@@ -91,7 +130,6 @@ def check_cuda_availability():
         return "cpu"
 
 # === 初始化组件 ===
-console = Console()
 try:
     # 确定设备
     DEVICE = check_cuda_availability()
@@ -125,6 +163,13 @@ def enhance_query(query: str):
     return enhanced_query
 
 def search_notes(query: str):
+    """搜索笔记"""
+    # 加载模型
+    device = check_cuda_availability()
+    console.print("正在加载模型，首次运行可能需要下载模型文件...")
+    model = SentenceTransformer(MODEL_NAME, device=device)
+    console.print("✓ 模型加载完成", style="green")
+    
     # 增强查询
     enhanced_query = enhance_query(query)
     
@@ -309,21 +354,13 @@ def search_notes(query: str):
         console.print("─" * 80)
 
 def main():
-    if len(sys.argv) > 1:
-        # 从命令行参数获取搜索查询
-        query = " ".join(sys.argv[1:])
-        search_notes(query)
-    else:
-        # 交互式模式
-        console.print("[bold]✨ 笔记语义搜索[/bold]")
-        console.print("输入 'q' 退出\n")
-        
-        while True:
-            query = input("🔍 请输入搜索内容: ").strip()
-            if query.lower() == 'q':
-                break
-            if query:
-                search_notes(query)
+    if not args.query:
+        console.print("请提供搜索关键词")
+        console.print("使用方法: python search_notes.py <关键词> [--offline]")
+        return
+    
+    query = args.query
+    search_notes(query)
 
 if __name__ == "__main__":
     main()

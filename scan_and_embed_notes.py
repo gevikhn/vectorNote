@@ -1,17 +1,9 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import os
-import re
-import uuid
-import hashlib
 import sys
-import torch
-import json
-import time
-from datetime import datetime
 from pathlib import Path
-from tqdm import tqdm
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, Distance, VectorParams, Filter, FieldCondition, MatchValue
 
 # === 配置项 ===
 ROOT_DIR = Path("D:/Notes")  # <-- ⚠️ 修改为你的 Obsidian 根目录路径
@@ -25,6 +17,63 @@ VECTOR_DIM = 1024  # 修改为模型的实际输出维度
 INDEX_FILE = "./note_index.json"  # 文件索引，记录文件修改时间
 FORCE_REINDEX = False  # 设置为True强制重新索引所有文件
 MD5_FILE_SIZE_THRESHOLD = 1024 * 1024 * 5  # 5MB，超过此大小的文件不计算MD5
+# 离线模式配置
+OFFLINE_MODE = False  # 设置为True启用离线模式，不会检查模型更新
+# 本地模型路径（如果有）
+LOCAL_MODEL_PATH = "./models/bge-large-zh"  # 如果有本地模型，指定路径
+
+# 处理命令行参数
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="扫描并向量化Markdown笔记")
+    parser.add_argument("--force", action="store_true", help="强制重新索引所有文件")
+    parser.add_argument("--offline", action="store_true", help="启用离线模式，使用本地缓存模型")
+    parser.add_argument("--show-help", action="store_true", help="显示帮助信息")
+    args = parser.parse_args()
+    
+    if args.force:
+        FORCE_REINDEX = True
+        print("⚠️ 已启用强制重新索引模式")
+    
+    if args.offline:
+        OFFLINE_MODE = True
+        print("⚠️ 已启用离线模式")
+        
+    if args.show_help:
+        print("使用方法:")
+        print("  python scan_and_embed_notes.py            # 增量更新，只处理新增或修改的文件")
+        print("  python scan_and_embed_notes.py --force    # 强制重新索引所有文件")
+        print("  python scan_and_embed_notes.py --offline  # 启用离线模式，使用本地缓存模型")
+        print("  python scan_and_embed_notes.py --show-help # 显示帮助信息")
+        sys.exit(0)
+
+# 设置离线模式环境变量（必须在导入模块前设置）
+if OFFLINE_MODE:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = "./models"  # 指定模型缓存目录
+    print("已设置离线模式环境变量")
+    
+    # 检查本地模型目录是否存在
+    if LOCAL_MODEL_PATH and os.path.exists(LOCAL_MODEL_PATH):
+        print(f"使用本地模型: {LOCAL_MODEL_PATH}")
+        MODEL_NAME = LOCAL_MODEL_PATH
+    else:
+        print(f"警告: 未找到本地模型 {LOCAL_MODEL_PATH}")
+        print("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+
+# 导入其他模块
+import hashlib
+import uuid
+import json
+import re
+import time
+from datetime import datetime
+from tqdm import tqdm
+import torch
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
 
 # === 检测CUDA可用性 ===
 def check_cuda_availability():
@@ -109,6 +158,7 @@ print("🔍 加载模型与数据库...")
 try:
     # 先加载模型，确保模型完全下载
     print("正在加载模型，首次运行可能需要下载模型文件...")
+    
     model = SentenceTransformer(MODEL_NAME, device=DEVICE)
     print("✓ 模型加载完成")
     
@@ -649,11 +699,6 @@ print("📁 正在扫描并处理 Markdown 文件...")
 index = load_index_file()
 deleted_count = remove_deleted_files(client, index)  # 删除已经不存在的文件的向量
 
-# 添加命令行参数支持
-if len(sys.argv) > 1 and sys.argv[1] == "--force":
-    print("⚠️ 强制模式：将重新索引所有文件")
-    FORCE_REINDEX = True
-
 # 扫描所有文件
 all_files = list(ROOT_DIR.rglob("*"))
 for path in tqdm(all_files, desc="处理文件"):
@@ -755,12 +800,3 @@ print(f"   - 新增/修改: {modified_count} 个文件")
 print(f"   - 跳过未修改: {skipped_count} 个文件")
 print(f"   - 删除: {deleted_count} 个文件")
 print(f"向量数据已写入 Qdrant 数据库。")
-
-# 添加帮助信息
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--help":
-        print("使用方法:")
-        print("  python scan_and_embed_notes.py            # 增量更新，只处理新增或修改的文件")
-        print("  python scan_and_embed_notes.py --force    # 强制重新索引所有文件")
-        print("  python scan_and_embed_notes.py --help     # 显示帮助信息")
-        sys.exit(0)
