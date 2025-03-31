@@ -4,11 +4,14 @@ import uuid
 import hashlib
 import sys
 import torch
+import json
+import time
+from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, Distance, VectorParams
+from qdrant_client.models import PointStruct, Distance, VectorParams, Filter, FieldCondition, MatchValue
 
 # === 配置项 ===
 ROOT_DIR = Path("D:/Notes")  # <-- ⚠️ 修改为你的 Obsidian 根目录路径
@@ -18,6 +21,10 @@ COLLECTION_NAME = "obsidian_notes"
 # 升级到更强大的模型
 MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 或者 "text2vec-large-chinese"
 VECTOR_DIM = 1024  # 修改为模型的实际输出维度
+# 增量更新配置
+INDEX_FILE = "./note_index.json"  # 文件索引，记录文件修改时间
+FORCE_REINDEX = False  # 设置为True强制重新索引所有文件
+MD5_FILE_SIZE_THRESHOLD = 1024 * 1024 * 5  # 5MB，超过此大小的文件不计算MD5
 
 # === 检测CUDA可用性 ===
 def check_cuda_availability():
@@ -513,18 +520,154 @@ def fix_markdown_syntax(text):
     
     return text
 
+# === 增量更新功能 ===
+def load_index_file():
+    """加载文件索引"""
+    if os.path.exists(INDEX_FILE):
+        with open(INDEX_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    else:
+        return {}
+
+def save_index_file(index):
+    """保存文件索引"""
+    with open(INDEX_FILE, 'w', encoding='utf-8') as f:
+        json.dump(index, f, ensure_ascii=False, indent=2)
+
+def get_file_mtime(path):
+    """获取文件最后修改时间"""
+    try:
+        mtime = os.path.getmtime(path)
+        return datetime.fromtimestamp(mtime).isoformat()
+    except Exception:
+        return datetime.now().isoformat()
+
+def is_file_modified(path, index):
+    """检查文件是否修改"""
+    path_str = str(path)
+    if path_str not in index:
+        return True
+    
+    try:
+        current_mtime = get_file_mtime(path)
+        return current_mtime != index[path_str]["mtime"]
+    except Exception:
+        return True
+
+def update_index_file(path, index):
+    """更新文件索引"""
+    path_str = str(path)
+    index[path_str] = {
+        "mtime": get_file_mtime(path),
+        "last_indexed": datetime.now().isoformat()
+    }
+
+def remove_deleted_files(client, index):
+    """删除已经不存在的文件的向量"""
+    deleted_count = 0
+    deleted_paths = []
+    
+    # 检查索引中的文件是否仍然存在
+    for path_str in list(index.keys()):
+        if not os.path.exists(path_str):
+            # 文件已删除，从索引中移除
+            deleted_paths.append(path_str)
+            del index[path_str]
+            deleted_count += 1
+    
+    # 从向量数据库中删除对应的向量
+    if deleted_paths:
+        print(f"🗑️ 检测到 {deleted_count} 个文件已删除，正在从向量数据库中移除...")
+        
+        # 分批处理删除操作，避免一次性删除过多
+        batch_size = 100
+        for i in range(0, len(deleted_paths), batch_size):
+            batch = deleted_paths[i:i+batch_size]
+            for path in batch:
+                try:
+                    # 创建过滤条件，匹配source字段
+                    filter_condition = Filter(
+                        must=[
+                            FieldCondition(
+                                key="source",
+                                match=MatchValue(value=path)
+                            )
+                        ]
+                    )
+                    
+                    # 删除匹配的点
+                    client.delete(
+                        collection_name=COLLECTION_NAME,
+                        points_selector=filter_condition
+                    )
+                except Exception as e:
+                    print(f"删除向量时出错: {e}")
+        
+        print(f"✅ 已从向量数据库中移除 {deleted_count} 个已删除文件的向量")
+    
+    return deleted_count
+
+def get_file_md5(path):
+    """获取文件的MD5哈希值"""
+    if os.path.getsize(path) > MD5_FILE_SIZE_THRESHOLD:
+        return None
+    
+    md5 = hashlib.md5()
+    with open(path, 'rb') as f:
+        while chunk := f.read(4096):
+            md5.update(chunk)
+    return md5.hexdigest()
+
+def is_file_content_modified(path, index):
+    """检查文件内容是否修改"""
+    path_str = str(path)
+    if path_str not in index:
+        return True
+    
+    try:
+        current_md5 = get_file_md5(path)
+        return current_md5 != index[path_str]["md5"]
+    except Exception:
+        return True
+
+def update_index_file_with_md5(path, index):
+    """更新文件索引，包括MD5哈希值"""
+    path_str = str(path)
+    index[path_str] = {
+        "mtime": get_file_mtime(path),
+        "md5": get_file_md5(path),
+        "last_indexed": datetime.now().isoformat()
+    }
+
 # === 遍历笔记并写入向量数据库 ===
 all_points = []
 file_count = 0
+modified_count = 0
+skipped_count = 0
 
 print("📁 正在扫描并处理 Markdown 文件...")
-for path in tqdm(list(ROOT_DIR.rglob("*"))):
+index = load_index_file()
+deleted_count = remove_deleted_files(client, index)  # 删除已经不存在的文件的向量
+
+# 添加命令行参数支持
+if len(sys.argv) > 1 and sys.argv[1] == "--force":
+    print("⚠️ 强制模式：将重新索引所有文件")
+    FORCE_REINDEX = True
+
+# 扫描所有文件
+all_files = list(ROOT_DIR.rglob("*"))
+for path in tqdm(all_files, desc="处理文件"):
     if not path.is_file() or path.suffix.lower() not in EXTENSIONS:
+        continue
+
+    if not FORCE_REINDEX and not is_file_modified(str(path), index) and not is_file_content_modified(path, index):
+        skipped_count += 1
         continue
 
     try:
         text = path.read_text(encoding="utf-8")
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 读取文件 {path} 失败: {e}")
         continue
 
     # 提取文件名（不含扩展名）作为额外的文本内容
@@ -538,6 +681,23 @@ for path in tqdm(list(ROOT_DIR.rglob("*"))):
     
     # 将文件名添加到文本内容的开头，增加权重
     text_with_filename = f"# {processed_filename}\n\n{text}"
+    
+    # 从向量数据库中删除该文件的旧向量（如果存在）
+    try:
+        filter_condition = Filter(
+            must=[
+                FieldCondition(
+                    key="source",
+                    match=MatchValue(value=str(path))
+                )
+            ]
+        )
+        client.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=filter_condition
+        )
+    except Exception as e:
+        print(f"删除旧向量时出错: {e}")
     
     chunks = split_markdown_chunks(text_with_filename)
     if not chunks:
@@ -574,12 +734,33 @@ for path in tqdm(list(ROOT_DIR.rglob("*"))):
         }
     ))
 
+    update_index_file_with_md5(path, index)
+    modified_count += 1
     file_count += 1
+    
     if len(all_points) >= 128:
         client.upsert(collection_name=COLLECTION_NAME, points=all_points)
         all_points = []
+        # 定期保存索引文件，避免中断导致索引丢失
+        save_index_file(index)
 
 if all_points:
     client.upsert(collection_name=COLLECTION_NAME, points=all_points)
 
-print(f"✅ 完成：共处理 {file_count} 个文件，向量数据已写入 Qdrant 数据库。")
+# 最后保存索引文件
+save_index_file(index)
+
+print(f"✅ 完成：共扫描 {len(all_files)} 个文件")
+print(f"   - 新增/修改: {modified_count} 个文件")
+print(f"   - 跳过未修改: {skipped_count} 个文件")
+print(f"   - 删除: {deleted_count} 个文件")
+print(f"向量数据已写入 Qdrant 数据库。")
+
+# 添加帮助信息
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--help":
+        print("使用方法:")
+        print("  python scan_and_embed_notes.py            # 增量更新，只处理新增或修改的文件")
+        print("  python scan_and_embed_notes.py --force    # 强制重新索引所有文件")
+        print("  python scan_and_embed_notes.py --help     # 显示帮助信息")
+        sys.exit(0)
