@@ -296,12 +296,13 @@ def search_notes(query: str):
             # 如果读取失败，使用向量数据库中的文本
             content_to_display = text
         
-        """ # 逐行显示内容，避免使用Markdown渲染
-        for line in content_to_display.split('\n'):
-            # 过滤掉不可打印字符
-            clean_line = ''.join(c for c in line if c.isprintable() or c in [' ', '\t'])
-            if clean_line.strip():
-                console.print(clean_line) """
+        # 确保内容是字符串类型
+        if not isinstance(content_to_display, str):
+            try:
+                content_to_display = str(content_to_display)
+            except Exception:
+                content_to_display = "错误：无法显示内容，内容格式不正确"
+        
         console.print(Markdown(content_to_display))
         
         console.print(f"\n[dim]来源: {source}[/dim]")

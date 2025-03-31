@@ -15,6 +15,135 @@ import os
 import streamlit.components.v1 as components
 import hashlib
 
+# 添加 markdown-it-py 和 pygments 支持
+try:
+    from markdown_it import MarkdownIt
+    from mdformat.renderer import MDRenderer
+    import pygments
+    from pygments.formatters import HtmlFormatter
+    from pygments.lexers import get_lexer_by_name, guess_lexer
+    
+    # 检查是否成功导入
+    MARKDOWN_IT_AVAILABLE = True
+    
+    # 自定义 Markdown 渲染函数
+    def render_markdown_with_highlight(text, keywords=None):
+        """
+        使用 markdown-it-py 和 pygments 渲染 Markdown 文本，
+        支持代码块语法高亮和关键词高亮
+        """
+        # 检查输入是否为字符串类型
+        if not isinstance(text, str):
+            try:
+                # 尝试将非字符串类型转换为字符串
+                text = str(text)
+            except Exception:
+                # 如果转换失败，返回错误信息
+                return "<p>错误：无法显示内容，内容格式不正确</p>"
+        
+        md = MarkdownIt("commonmark", {"html": True})
+        
+        # 添加代码块语法高亮支持
+        def highlight_code(code, lang, attrs):
+            try:
+                # 确保代码是字符串类型
+                if not isinstance(code, str):
+                    try:
+                        code = str(code)
+                    except Exception:
+                        return "<pre><code>错误：无法显示代码块内容</code></pre>"
+                
+                if lang and lang.strip():
+                    try:
+                        lexer = get_lexer_by_name(lang, stripall=True)
+                    except Exception:
+                        # 如果找不到指定语言的词法分析器，使用普通文本
+                        lexer = get_lexer_by_name("text", stripall=True)
+                else:
+                    try:
+                        # 尝试猜测语言
+                        lexer = guess_lexer(code)
+                    except Exception:
+                        # 如果猜测失败，使用普通文本
+                        lexer = get_lexer_by_name("text", stripall=True)
+                
+                formatter = HtmlFormatter(style="default", cssclass="highlight")
+                return pygments.highlight(code, lexer, formatter)
+            except Exception as e:
+                # 如果高亮失败，返回原始代码并添加错误信息
+                return f"<pre><code>{code}</code></pre><!-- 渲染错误: {str(e)} -->"
+        
+        # 设置代码块高亮函数
+        md.options.highlight = highlight_code
+        
+        # 渲染 Markdown
+        html = md.render(text)
+        
+        # 如果有关键词，进行高亮处理
+        if keywords and len(keywords) > 0:
+            # 避免在代码块和标签内部进行高亮
+            in_code_block = False
+            in_tag = False
+            result = []
+            i = 0
+            
+            while i < len(html):
+                if html[i:i+5] == "<pre>" or html[i:i+6] == "<code>":
+                    in_code_block = True
+                    result.append(html[i])
+                elif html[i:i+6] == "</pre>" or html[i:i+7] == "</code>":
+                    in_code_block = False
+                    result.append(html[i])
+                elif html[i] == "<":
+                    in_tag = True
+                    result.append(html[i])
+                elif html[i] == ">":
+                    in_tag = False
+                    result.append(html[i])
+                elif not in_code_block and not in_tag:
+                    # 检查是否是关键词开始
+                    matched = False
+                    for word in keywords:
+                        if len(word) >= 2 and i + len(word) <= len(html):
+                            word_lower = word.lower()
+                            text_to_check = html[i:i+len(word)].lower()
+                            if word_lower == text_to_check:
+                                # 找到关键词，添加高亮
+                                result.append(f'<span style="background-color: yellow; font-weight: bold;">{html[i:i+len(word)]}</span>')
+                                i += len(word) - 1
+                                matched = True
+                                break
+                    
+                    if not matched:
+                        result.append(html[i])
+                else:
+                    result.append(html[i])
+                
+                i += 1
+            
+            html = "".join(result)
+        
+        # 添加 Pygments CSS 样式
+        pygments_css = HtmlFormatter(style="default").get_style_defs('.highlight')
+        html = f"""
+        <style>
+        {pygments_css}
+        .highlight {{
+            border-radius: 3px;
+            padding: 0.5em;
+            overflow: auto;
+            margin-bottom: 1em;
+        }}
+        </style>
+        {html}
+        """
+        
+        return html
+except ImportError:
+    MARKDOWN_IT_AVAILABLE = False
+    st.sidebar.warning("⚠️ 未安装 markdown-it-py 或 pygments 库，将使用基本 Markdown 渲染")
+    st.sidebar.info("可以通过运行 `pip install markdown-it-py pygments mdformat` 安装所需库")
+
 # 配置
 COLLECTION_NAME = "obsidian_notes"
 MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 升级到更强大的模型
@@ -144,8 +273,24 @@ if model is None or client is None:
 # UI
 st.title("🔍 Obsidian 笔记语义搜索")
 
+# 侧边栏配置
+st.sidebar.header("⚙️ 搜索配置")
+top_k = st.sidebar.slider("返回结果数量", 1, 20, 5)
+score_threshold = st.sidebar.slider("相似度阈值", 0.0, 1.0, 0.45, 0.01)
+max_display_lines = st.sidebar.slider("每个结果最大显示行数", 10, 100, 50)
+highlight_keywords = st.sidebar.checkbox("高亮关键词", value=True)
+show_full_path = st.sidebar.checkbox("显示完整文件路径", value=True)
+
+# 添加高级选项折叠区
+with st.sidebar.expander("🔧 高级选项"):
+    use_original_file = st.checkbox("优先使用原始文件内容", value=True, 
+                                  help="如果选中，将尝试读取原始文件内容而不仅仅使用向量数据库中的片段")
+    apply_markdown_fix = st.checkbox("修复截断的Markdown语法", value=True,
+                                   help="自动修复可能被截断的Markdown语法，如代码块、链接等")
+    sort_by_filename = st.checkbox("文件名匹配优先", value=True,
+                                 help="如果文件名包含搜索关键词，则优先显示")
+
 query = st.text_input("请输入你的问题或关键词：", "")
-top_k = st.slider("返回结果数量", 1, 20, 5)
 
 # 查询增强函数
 def enhance_query(query: str):
@@ -159,6 +304,37 @@ def enhance_query(query: str):
     enhanced_query = f"查询：{query}"
     
     return enhanced_query
+
+# 检查并修复可能的Markdown截断问题
+def fix_truncated_markdown(text):
+    # 修复可能被截断的图片链接
+    img_pattern = r'!\[.*?\]\([^\)]*$'
+    if re.search(img_pattern, text):
+        text += ")"  # 添加缺失的右括号
+    
+    # 修复可能被截断的链接
+    link_pattern = r'\[.*?\]\([^\)]*$'
+    if re.search(link_pattern, text):
+        text += ")"  # 添加缺失的右括号
+    
+    # 修复可能被截断的代码块
+    if text.count("```") % 2 != 0:
+        text += "\n```"  # 添加缺失的代码块结束标记
+    
+    # 修复可能被截断的强调标记
+    if text.count("**") % 2 != 0:
+        text += "**"  # 添加缺失的强调结束标记
+    
+    if text.count("*") % 2 != 0:
+        text += "*"  # 添加缺失的斜体结束标记
+    
+    if text.count("__") % 2 != 0:
+        text += "__"  # 添加缺失的下划线结束标记
+    
+    if text.count("_") % 2 != 0:
+        text += "_"  # 添加缺失的下划线结束标记
+    
+    return text
 
 # 搜索逻辑
 if query:
@@ -174,7 +350,7 @@ if query:
             collection_name=COLLECTION_NAME,
             query=query_vector,
             limit=top_k * 3,
-            score_threshold=0.45  # 降低相似度阈值，增加召回率
+            score_threshold=score_threshold  # 降低相似度阈值，增加召回率
         ).points
         
         # 文件名精确匹配搜索（优先显示）
@@ -260,73 +436,107 @@ if query:
             content = hit.payload["text"]
             
             # 尝试读取原始文件以获取更完整的内容
-            try:
-                if os.path.exists(raw_path):
-                    with open(raw_path, 'r', encoding='utf-8') as f:
-                        full_content = f.read()
-                    
-                    # 提取文件的主要内容（最多显示前50行有意义的内容）
-                    lines = full_content.split('\n')
-                    # 去除空行
-                    meaningful_lines = [line for line in lines if line.strip()]
-                    
-                    # 提取前50行非空内容
-                    if len(meaningful_lines) > 50:
-                        preview_lines = meaningful_lines[:50]
-                        preview_text = '\n'.join(preview_lines)
-                        preview_text += "\n...(更多内容)"
-                    else:
-                        preview_text = full_content
-                    
-                    # 使用完整内容替换向量数据库中的片段
-                    content = preview_text
-            except Exception as e:
-                st.warning(f"读取原始文件时出错: {str(e)}，将使用向量数据库中的内容片段")
+            if use_original_file:
+                try:
+                    if os.path.exists(raw_path):
+                        with open(raw_path, 'r', encoding='utf-8') as f:
+                            full_content = f.read()
+                        
+                        # 提取文件的主要内容
+                        lines = full_content.split('\n')
+                        # 去除空行
+                        meaningful_lines = [line for line in lines if line.strip()]
+                        
+                        # 根据用户设置的最大显示行数提取内容
+                        if len(meaningful_lines) > max_display_lines:
+                            preview_lines = meaningful_lines[:max_display_lines]
+                            preview_text = '\n'.join(preview_lines)
+                            preview_text += "\n...(更多内容)"
+                        else:
+                            preview_text = full_content
+                        
+                        # 使用完整内容替换向量数据库中的片段
+                        content = preview_text
+                except Exception as e:
+                    st.warning(f"读取原始文件时出错: {str(e)}，将使用向量数据库中的内容片段")
             
             # 检查并修复可能的Markdown截断问题
-            def fix_truncated_markdown(text):
-                # 修复可能被截断的图片链接
-                img_pattern = r'!\[.*?\]\([^\)]*$'
-                if re.search(img_pattern, text):
-                    text += ")"  # 添加缺失的右括号
-                
-                # 修复可能被截断的链接
-                link_pattern = r'\[.*?\]\([^\)]*$'
-                if re.search(link_pattern, text):
-                    text += ")"  # 添加缺失的右括号
-                
-                # 修复可能被截断的代码块
-                if text.count("```") % 2 != 0:
-                    text += "\n```"  # 添加缺失的代码块结束标记
-                
-                # 修复可能被截断的强调标记
-                if text.count("**") % 2 != 0:
-                    text += "**"  # 添加缺失的强调结束标记
-                
-                if text.count("*") % 2 != 0:
-                    text += "*"  # 添加缺失的斜体结束标记
-                
-                if text.count("__") % 2 != 0:
-                    text += "__"  # 添加缺失的下划线结束标记
-                
-                if text.count("_") % 2 != 0:
-                    text += "_"  # 添加缺失的下划线结束标记
-                
-                return text
+            if apply_markdown_fix:
+                content = fix_truncated_markdown(content)
             
-            # 修复可能的截断问题
-            content = fix_truncated_markdown(content)
+            # 确保内容是字符串类型
+            if not isinstance(content, str):
+                try:
+                    content = str(content)
+                except Exception:
+                    content = "错误：无法显示内容，内容格式不正确"
             
-            # 高亮关键词
-            highlighted_content = content
-            for word in keywords:
-                if len(word) >= 2:
-                    highlighted_content = re.sub(
-                        fr'\b({re.escape(word)})\b', 
-                        r'<span style="background-color: yellow; font-weight: bold;">\1</span>', 
-                        highlighted_content, 
-                        flags=re.IGNORECASE
-                    )
+            # 使用Streamlit的expander组件显示内容
+            with st.expander("📝 笔记内容", expanded=True):
+                # 直接使用Streamlit的Markdown渲染功能，避免自定义处理
+                # 对于关键词高亮，我们将在渲染后通过JavaScript处理
+                st.markdown(content, unsafe_allow_html=False)
+                
+                # 如果需要高亮关键词，添加JavaScript
+                if highlight_keywords and keywords:
+                    # 创建一个唯一的ID
+                    content_id = hashlib.md5(content.encode()).hexdigest()
+                    
+                    # 添加关键词高亮的JavaScript
+                    highlight_js = f"""
+                    <script>
+                    document.addEventListener('DOMContentLoaded', function() {{
+                        const keywords = {str(keywords).lower()};
+                        if (!keywords || keywords.length === 0) return;
+                        
+                        // 查找所有文本节点
+                        function findTextNodes(node) {{
+                            const textNodes = [];
+                            if (node.nodeType === 3) {{ // 文本节点
+                                textNodes.push(node);
+                            }} else if (node.nodeType === 1 && !['CODE', 'PRE'].includes(node.tagName)) {{
+                                for (let i = 0; i < node.childNodes.length; i++) {{
+                                    textNodes.push(...findTextNodes(node.childNodes[i]));
+                                }}
+                            }}
+                            return textNodes;
+                        }}
+                        
+                        // 获取所有Markdown内容的容器
+                        const containers = document.querySelectorAll('.stMarkdown');
+                        containers.forEach(container => {{
+                            const textNodes = findTextNodes(container);
+                            
+                            // 高亮关键词
+                            textNodes.forEach(node => {{
+                                let text = node.nodeValue;
+                                let parent = node.parentNode;
+                                let highlightedText = text;
+                                let hasHighlight = false;
+                                
+                                keywords.forEach(keyword => {{
+                                    if (keyword.length < 2) return;
+                                    
+                                    const regex = new RegExp('\\\\b' + keyword + '\\\\b', 'gi');
+                                    highlightedText = highlightedText.replace(regex, match => {{
+                                        hasHighlight = true;
+                                        return `<span style="background-color: yellow; font-weight: bold;">${{match}}</span>`;
+                                    }});
+                                }});
+                                
+                                if (hasHighlight) {{
+                                    const span = document.createElement('span');
+                                    span.innerHTML = highlightedText;
+                                    parent.replaceChild(span, node);
+                                }}
+                            }});
+                        }});
+                    }});
+                    </script>
+                    """
+                    
+                    # 添加JavaScript
+                    st.components.v1.html(highlight_js, height=0)
             
             # 文档跳转链接
             abs_path = Path(raw_path).resolve()
@@ -334,45 +544,16 @@ if query:
             # 添加文件路径和打开按钮
             col1, col2 = st.columns([4, 1])
             with col1:
-                st.markdown(f"**📎 文件路径：** {raw_path}", unsafe_allow_html=True)
+                if show_full_path:
+                    st.markdown(f"**📎 文件路径：** {raw_path}", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**📎 文件名：** {abs_path.name}", unsafe_allow_html=True)
             with col2:
                 if st.button("🔗 打开文件", key=f"link_{raw_path}"):
                     # 使用系统默认方式打开文件
                     success, error = open_file_with_app(str(abs_path))
                     if not success:
                         st.error(f"打开失败: {error}")
-            
-            # 使用Streamlit的expander组件显示内容
-            with st.expander("📝 笔记内容", expanded=True):
-                # 添加自定义CSS样式
-                st.markdown("""
-                <style>
-                .markdown-content img {
-                    max-width: 100%;
-                    height: auto;
-                }
-                .markdown-content pre {
-                    background-color: #f6f8fa;
-                    border-radius: 3px;
-                    padding: 16px;
-                    overflow: auto;
-                }
-                .markdown-content code {
-                    font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
-                    font-size: 85%;
-                    padding: 0.2em 0.4em;
-                    background-color: rgba(27, 31, 35, 0.05);
-                    border-radius: 3px;
-                }
-                .markdown-content pre code {
-                    background-color: transparent;
-                    padding: 0;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-                
-                # 使用div包装内容以应用样式
-                st.markdown(f'<div class="markdown-content">{highlighted_content}</div>', unsafe_allow_html=True)
             
             st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)
             st.markdown("---")
