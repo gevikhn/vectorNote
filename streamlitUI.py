@@ -321,6 +321,35 @@ if model is None or client is None:
 # UI
 st.title("🔍 Obsidian 笔记语义搜索")
 
+# 添加自定义CSS样式
+st.markdown("""
+<style>
+/* 固定在顶部的按钮样式 */
+.fixed-top-button {
+    position: fixed;
+    top: 60px;
+    right: 20px;
+    z-index: 9999;
+    background-color: #ff4b4b;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+/* 确保按钮宽度合适 */
+.stButton button {
+    width: 100%;
+}
+/* 内容按钮的间距 */
+.content-button {
+    margin: 10px 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # 侧边栏配置
 st.sidebar.header("⚙️ 搜索配置")
 top_k = st.sidebar.slider("返回结果数量", 1, 20, 5)
@@ -391,12 +420,12 @@ def locate_keywords_in_text(text, keywords, context_lines=5):
     """
     在文本中定位关键字，并返回包含关键字的上下文
     
-    参数:
+    参数：
         text (str): 要搜索的文本
         keywords (list): 关键字列表
         context_lines (int): 关键字前后要显示的行数
         
-    返回:
+    返回：
         dict: 包含关键字位置和上下文的字典
     """
     if not isinstance(text, str) or not keywords:
@@ -430,8 +459,51 @@ def locate_keywords_in_text(text, keywords, context_lines=5):
     prefix = "..." if start_line > 0 else ""
     suffix = "..." if end_line < len(lines) else ""
     
-    # 组合最终文本
-    final_text = f"{prefix}\n{context_text}\n{suffix}" if prefix or suffix else context_text
+    # 组合最终文本，保留Markdown格式
+    final_text = ""
+    if prefix:
+        final_text += f"{prefix}\n"
+    
+    # 检查是否在代码块内部
+    in_code_block = False
+    code_block_start = -1
+    
+    # 检查上下文前面是否有未闭合的代码块
+    for i in range(start_line):
+        line = lines[i]
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            if in_code_block:
+                code_block_start = i
+    
+    # 如果我们在代码块内部开始，需要添加代码块开始标记
+    if in_code_block and code_block_start >= 0:
+        # 获取代码块的语言
+        code_block_line = lines[code_block_start].strip()
+        code_lang = code_block_line[3:].strip() if len(code_block_line) > 3 else ""
+        final_text += f"```{code_lang}\n"
+    
+    # 添加上下文内容
+    final_text += context_text
+    
+    # 检查上下文后面是否有未闭合的代码块
+    if in_code_block:
+        found_closing = False
+        for i in range(end_line, len(lines)):
+            if lines[i].strip().startswith("```"):
+                found_closing = True
+                break
+        
+        # 如果没有找到闭合的代码块标记，添加一个
+        if not found_closing:
+            final_text += "\n```"
+    
+    # 添加后缀
+    if suffix:
+        final_text += f"\n{suffix}"
+    
+    # 检查并修复可能的Markdown截断问题
+    final_text = fix_truncated_markdown(final_text)
     
     return {
         "full_text": text,
@@ -537,6 +609,67 @@ if query:
 
         keywords = list(set(re.findall(r'\w+', query.lower())))
 
+        # 初始化会话状态变量，用于跟踪显示完整内容的状态
+        if 'show_full_content' not in st.session_state:
+            st.session_state.show_full_content = {}
+        
+        # 初始化会话状态变量，用于跟踪当前查看的文件ID
+        if 'current_file_id' not in st.session_state:
+            st.session_state.current_file_id = None
+        
+        # 初始化会话状态变量，用于跟踪滚动位置
+        if 'scroll_to_file' not in st.session_state:
+            st.session_state.scroll_to_file = None
+        
+        # 如果有正在查看完整内容的文件，显示固定在顶部的按钮
+        if st.session_state.current_file_id and st.session_state.show_full_content.get(st.session_state.current_file_id, False):
+            # 使用Streamlit组件创建固定样式的按钮容器
+            st.markdown("""
+            <style>
+            .fixed-top-container {
+                position: fixed;
+                top: 60px;
+                right: 20px;
+                z-index: 9999;
+                background-color: white;
+                padding: 5px;
+                border-radius: 5px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # 创建一个隐藏的按钮，用于处理收起操作
+            col1, col2, col3 = st.columns([4, 2, 4])
+            with col2:
+                if st.button("📎 收起完整内容", key="fixed_top_button", type="primary"):
+                    file_id = st.session_state.current_file_id
+                    st.session_state.show_full_content[file_id] = False
+                    st.session_state.scroll_to_file = file_id
+                    st.rerun()
+            
+            # 使用JavaScript将按钮移动到固定位置
+            st.markdown("""
+            <script>
+                // 等待DOM加载完成
+                document.addEventListener('DOMContentLoaded', function() {
+                    // 找到按钮元素
+                    const buttonElement = document.querySelector('[data-testid="baseButton-primary"]');
+                    if (buttonElement) {
+                        // 创建固定容器
+                        const container = document.createElement('div');
+                        container.className = 'fixed-top-container';
+                        
+                        // 将按钮移动到容器中
+                        container.appendChild(buttonElement);
+                        
+                        // 将容器添加到body
+                        document.body.appendChild(container);
+                    }
+                });
+            </script>
+            """, unsafe_allow_html=True)
+        
         for hit in results:
             raw_path = hit.payload["source"]
             content = hit.payload["text"]
@@ -643,10 +776,38 @@ if query:
             # 定位关键字并获取上下文
             keyword_info = locate_keywords_in_text(content, keywords, context_lines=10)
             
+            # 为当前文件创建唯一ID
+            file_id = hashlib.md5(raw_path.encode()).hexdigest()
+            
+            # 初始化会话状态，如果不存在
+            if file_id not in st.session_state.show_full_content:
+                st.session_state.show_full_content[file_id] = False
+            
+            # 创建锚点，用于滚动定位
+            st.markdown(f'<div id="file_{file_id}"></div>', unsafe_allow_html=True)
+            
+            # 如果需要滚动到此文件，添加JavaScript滚动代码
+            if st.session_state.scroll_to_file == file_id:
+                st.markdown(
+                    f"""
+                    <script>
+                        document.addEventListener('DOMContentLoaded', function() {{
+                            const element = document.getElementById('file_{file_id}');
+                            if (element) {{
+                                element.scrollIntoView({{behavior: 'smooth'}});
+                            }}
+                        }});
+                    </script>
+                    """,
+                    unsafe_allow_html=True
+                )
+                # 重置滚动状态，防止重复滚动
+                st.session_state.scroll_to_file = None
+            
             # 使用Streamlit的expander组件显示内容
             with st.expander("📝 笔记内容", expanded=True):
                 # 如果找到了关键字，先显示包含关键字的上下文
-                if keyword_info["has_keywords"]:
+                if keyword_info["has_keywords"] and not st.session_state.show_full_content[file_id]:
                     st.markdown("**🔍 关键字匹配位置:**", unsafe_allow_html=True)
                     
                     # 使用自定义Markdown渲染函数或Streamlit的markdown组件
@@ -680,67 +841,77 @@ if query:
                         # 否则使用Streamlit的markdown组件
                         st.markdown(keyword_info["context_text"], unsafe_allow_html=True)
                     
-                    # 添加查看完整内容的选项
-                    if st.button("查看完整内容", key=f"full_{raw_path}"):
-                        st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
-                        if full_file_content is not None:
-                            if MARKDOWN_IT_AVAILABLE:
-                                rendered_html = render_markdown_with_highlight(full_file_content, keywords)
-                                content_height = max(500, len(full_file_content.split('\n')) * 20)
-                                styled_html = f"""
-                                <style>
-                                .markdown-content {{
-                                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-                                    line-height: 1.6;
-                                    padding: 10px;
-                                    overflow-y: auto;
-                                    max-height: 100%;
-                                    border-radius: 5px;
-                                }}
-                                .markdown-content pre {{
-                                    background-color: #f5f5f5;
-                                    padding: 10px;
-                                    border-radius: 5px;
-                                    overflow-x: auto;
-                                }}
-                                </style>
-                                <div class="markdown-content">
-                                {rendered_html}
-                                </div>
-                                """
-                                st.components.v1.html(styled_html, height=content_height, scrolling=True)
-                            else:
-                                st.markdown(full_file_content, unsafe_allow_html=True)
-                        else:
-                            if MARKDOWN_IT_AVAILABLE:
-                                rendered_html = render_markdown_with_highlight(keyword_info["full_text"], keywords)
-                                content_height = max(500, len(keyword_info["full_text"].split('\n')) * 20)
-                                styled_html = f"""
-                                <style>
-                                .markdown-content {{
-                                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-                                    line-height: 1.6;
-                                    padding: 10px;
-                                    overflow-y: auto;
-                                    max-height: 100%;
-                                    border-radius: 5px;
-                                }}
-                                .markdown-content pre {{
-                                    background-color: #f5f5f5;
-                                    padding: 10px;
-                                    border-radius: 5px;
-                                    overflow-x: auto;
-                                }}
-                                </style>
-                                <div class="markdown-content">
-                                {rendered_html}
-                                </div>
-                                """
-                                st.components.v1.html(styled_html, height=content_height, scrolling=True)
-                            else:
-                                st.markdown(keyword_info["full_text"], unsafe_allow_html=True)
-                elif content_has_keywords and full_file_content is not None:
-                    # 如果原始文件内容被截断，提供查看完整内容的选项
+                    # 添加查看完整内容的按钮
+                    if st.button("查看完整内容", key=f"full_{file_id}"):
+                        st.session_state.show_full_content[file_id] = True
+                        st.session_state.current_file_id = file_id
+                        st.rerun()
+                
+                # 显示完整内容
+                elif st.session_state.show_full_content[file_id]:
+                    # 记录当前文件ID
+                    st.session_state.current_file_id = file_id
+                    
+                    st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
+                    
+                    # 确定要显示的内容
+                    display_content = full_file_content if full_file_content is not None else keyword_info["full_text"]
+                    
+                    # 使用自定义Markdown渲染函数或Streamlit的markdown组件
+                    if MARKDOWN_IT_AVAILABLE:
+                        rendered_html = render_markdown_with_highlight(display_content, keywords)
+                        content_height = max(500, len(display_content.split('\n')) * 20)
+                        styled_html = f"""
+                        <style>
+                        .markdown-content {{
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                            line-height: 1.6;
+                            padding: 10px;
+                            overflow-y: auto;
+                            max-height: 100%;
+                            border-radius: 5px;
+                        }}
+                        .markdown-content pre {{
+                            background-color: #f5f5f5;
+                            padding: 10px;
+                            border-radius: 5px;
+                            overflow-x: auto;
+                        }}
+                        </style>
+                        <div class="markdown-content">
+                        {rendered_html}
+                        </div>
+                        """
+                        st.components.v1.html(styled_html, height=content_height, scrolling=True)
+                    else:
+                        st.markdown(display_content, unsafe_allow_html=True)
+                    
+                    # 移除这里的按钮代码，避免在每个搜索结果中都显示按钮
+                    # if st.session_state.current_file_id and st.session_state.show_full_content.get(st.session_state.current_file_id, False):
+                    #     fixed_button_html = f"""
+                    #     <button 
+                    #         onclick="window.location.href='?collapse={file_id}'" 
+                    #         class="fixed-top-button"
+                    #     >
+                    #         📎 收起完整内容
+                    #     </button>
+                    #     """
+                    #     st.markdown(fixed_button_html, unsafe_allow_html=True)
+                    #     
+                    #     # 检查URL参数，处理收起操作
+                    #     query_params = st.experimental_get_query_params()
+                    #     if "collapse" in query_params:
+                    #         collapse_id = query_params["collapse"][0]
+                    #         if collapse_id in st.session_state.show_full_content:
+                    #             st.session_state.show_full_content[collapse_id] = False
+                    #             st.session_state.scroll_to_file = collapse_id
+                    #             # 清除URL参数
+                    #             st.experimental_set_query_params()
+                    #             st.rerun()
+                
+                # 如果原始文件内容被截断但没有找到关键字，提供查看完整内容的选项
+                elif content_has_keywords and full_file_content is not None and not st.session_state.show_full_content[file_id]:
+                    # 使用自定义Markdown渲染函数或Streamlit的markdown组件
                     if MARKDOWN_IT_AVAILABLE:
                         rendered_html = render_markdown_with_highlight(content, keywords)
                         content_height = max(300, len(content.split('\n')) * 20)
@@ -769,38 +940,15 @@ if query:
                     else:
                         st.markdown(content, unsafe_allow_html=True)
                     
-                    # 添加查看完整内容的选项
-                    if st.button("查看完整内容", key=f"full_{raw_path}"):
-                        st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
-                        if MARKDOWN_IT_AVAILABLE:
-                            rendered_html = render_markdown_with_highlight(full_file_content, keywords)
-                            content_height = max(500, len(full_file_content.split('\n')) * 20)
-                            styled_html = f"""
-                            <style>
-                            .markdown-content {{
-                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-                                line-height: 1.6;
-                                padding: 10px;
-                                overflow-y: auto;
-                                max-height: 100%;
-                                border-radius: 5px;
-                            }}
-                            .markdown-content pre {{
-                                background-color: #f5f5f5;
-                                padding: 10px;
-                                border-radius: 5px;
-                                overflow-x: auto;
-                            }}
-                            </style>
-                            <div class="markdown-content">
-                            {rendered_html}
-                            </div>
-                            """
-                            st.components.v1.html(styled_html, height=content_height, scrolling=True)
-                        else:
-                            st.markdown(full_file_content, unsafe_allow_html=True)
+                    # 添加查看完整内容的按钮
+                    if st.button("查看完整内容", key=f"full_{file_id}"):
+                        st.session_state.show_full_content[file_id] = True
+                        st.session_state.current_file_id = file_id
+                        st.rerun()
+                
+                # 如果没有找到关键字，直接显示完整内容
                 else:
-                    # 如果没有找到关键字，直接显示完整内容
+                    # 使用自定义Markdown渲染函数或Streamlit的markdown组件
                     if MARKDOWN_IT_AVAILABLE:
                         rendered_html = render_markdown_with_highlight(content, keywords)
                         content_height = max(300, len(content.split('\n')) * 20)
@@ -835,53 +983,53 @@ if query:
                     
                     highlight_js = f"""
                     <script>
-                    document.addEventListener('DOMContentLoaded', function() {{
-                        const keywords = {str(keywords).lower()};
-                        if (!keywords || keywords.length === 0) return;
-                        
-                        // 查找所有文本节点
-                        function findTextNodes(node) {{
-                            const textNodes = [];
-                            if (node.nodeType === 3) {{ // 文本节点
-                                textNodes.push(node);
-                            }} else if (node.nodeType === 1 && !['CODE', 'PRE'].includes(node.tagName)) {{
-                                for (let i = 0; i < node.childNodes.length; i++) {{
-                                    textNodes.push(...findTextNodes(node.childNodes[i]));
-                                }}
-                            }}
-                            return textNodes;
-                        }}
-                        
-                        // 获取所有Markdown内容的容器
-                        const containers = document.querySelectorAll('.stMarkdown');
-                        containers.forEach(container => {{
-                            const textNodes = findTextNodes(container);
+                        document.addEventListener('DOMContentLoaded', function() {{
+                            const keywords = {str(keywords).lower()};
+                            if (!keywords || keywords.length === 0) return;
                             
-                            // 高亮关键词
-                            textNodes.forEach(node => {{
-                                let text = node.nodeValue;
-                                let parent = node.parentNode;
-                                let highlightedText = text;
-                                let hasHighlight = false;
-                                
-                                keywords.forEach(keyword => {{
-                                    if (keyword.length < 2) return;
-                                    
-                                    const regex = new RegExp('\\\\b' + keyword + '\\\\b', 'gi');
-                                    highlightedText = highlightedText.replace(regex, match => {{
-                                        hasHighlight = true;
-                                        return `<span style="background-color: yellow; font-weight: bold;">${{match}}</span>`;
-                                    }});
-                                }});
-                                
-                                if (hasHighlight) {{
-                                    const span = document.createElement('span');
-                                    span.innerHTML = highlightedText;
-                                    parent.replaceChild(span, node);
+                            // 查找所有文本节点
+                            function findTextNodes(node) {{
+                                const textNodes = [];
+                                if (node.nodeType === 3) {{ // 文本节点
+                                    textNodes.push(node);
+                                }} else if (node.nodeType === 1 && !['CODE', 'PRE'].includes(node.tagName)) {{
+                                    for (let i = 0; i < node.childNodes.length; i++) {{
+                                        textNodes.push(...findTextNodes(node.childNodes[i]));
+                                    }}
                                 }}
+                                return textNodes;
+                            }}
+                            
+                            // 获取所有Markdown内容的容器
+                            const containers = document.querySelectorAll('.stMarkdown');
+                            containers.forEach(container => {{
+                                const textNodes = findTextNodes(container);
+                                
+                                // 高亮关键词
+                                textNodes.forEach(node => {{
+                                    let text = node.nodeValue;
+                                    let parent = node.parentNode;
+                                    let highlightedText = text;
+                                    let hasHighlight = false;
+                                    
+                                    keywords.forEach(keyword => {{
+                                        if (keyword.length < 2) return;
+                                        
+                                        const regex = new RegExp('\\\\b' + keyword + '\\\\b', 'gi');
+                                        highlightedText = highlightedText.replace(regex, match => {{
+                                            hasHighlight = true;
+                                            return `<span style="background-color: yellow; font-weight: bold;">${{match}}</span>`;
+                                        }});
+                                    }});
+                                    
+                                    if (hasHighlight) {{
+                                        const span = document.createElement('span');
+                                        span.innerHTML = highlightedText;
+                                        parent.replaceChild(span, node);
+                                    }}
+                                }});
                             }});
                         }});
-                    }});
                     </script>
                     """
                     
@@ -889,5 +1037,6 @@ if query:
             
             # 添加分隔线
             st.markdown("---")
+        
     else:
         st.warning("没有找到相关内容。")
