@@ -2,6 +2,8 @@ import os
 import re
 import uuid
 import hashlib
+import sys
+import torch
 from pathlib import Path
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
@@ -13,20 +15,123 @@ ROOT_DIR = Path("D:/Notes")  # <-- ⚠️ 修改为你的 Obsidian 根目录路�
 EXTENSIONS = [".md"]
 CHUNK_SIZE = 300
 COLLECTION_NAME = "obsidian_notes"
-MODEL_NAME = "BAAI/bge-small-zh"
-VECTOR_DIM = 512  # 修改为模型的实际输出维度
+# 升级到更强大的模型
+MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 或者 "text2vec-large-chinese"
+VECTOR_DIM = 1024  # 修改为模型的实际输出维度
+
+# === 检测CUDA可用性 ===
+def check_cuda_availability():
+    """检测是否有可用的CUDA设备，特别针对Windows环境优化"""
+    try:
+        # 尝试直接获取CUDA设备信息
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+            device_name = torch.cuda.get_device_name(0) if device_count > 0 else "未知"
+            print(f"✅ 检测到 {device_count} 个CUDA设备: {device_name}")
+            print(f"✅ 将使用GPU进行加速处理")
+            return "cuda"
+        
+        # 如果上面的检测失败，尝试直接创建CUDA张量
+        try:
+            # 尝试在CUDA上创建一个小张量
+            test_tensor = torch.tensor([1.0], device="cuda")
+            del test_tensor  # 清理
+            print(f"✅ 通过测试张量检测到CUDA设备")
+            print(f"✅ 将使用GPU进行加速处理")
+            return "cuda"
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                print(f"⚠️ 检测到错误: {e}")
+                print("⚠️ 你的PyTorch没有CUDA支持")
+            pass
+            
+        # 在Windows上，尝试使用系统命令检测NVIDIA显卡
+        nvidia_detected = False
+        if os.name == 'nt':  # Windows系统
+            try:
+                # 使用nvidia-smi命令检测显卡
+                result = os.system('nvidia-smi >nul 2>&1')
+                if result == 0:
+                    print(f"✅ 通过nvidia-smi检测到NVIDIA显卡")
+                    nvidia_detected = True
+                    
+                    # 检查PyTorch是否支持CUDA
+                    if not torch.cuda.is_available():
+                        print("⚠️ 检测到NVIDIA显卡，但当前PyTorch版本不支持CUDA")
+                        print("⚠️ 请注意: 你使用的是Python 3.13，目前PyTorch官方尚未为此版本提供CUDA支持")
+                        print("⚠️ 建议方案:")
+                        print("⚠️ 1. 降级到Python 3.10或3.11，然后安装支持CUDA的PyTorch")
+                        print("⚠️    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
+                        print("⚠️ 2. 或者继续使用CPU模式（速度较慢）")
+                        print("⚠️ 将使用CPU处理（速度较慢）")
+                        return "cpu"
+                    
+                    # 强制设置CUDA可见
+                    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+                    # 重新初始化CUDA
+                    if torch.cuda.is_available():
+                        device_name = torch.cuda.get_device_name(0)
+                        print(f"✅ 已启用CUDA设备: {device_name}")
+                        print(f"✅ 将使用GPU进行加速处理")
+                        return "cuda"
+            except Exception:
+                pass
+                
+        # 所有检测方法都失败，使用CPU
+        if nvidia_detected:
+            print("⚠️ 检测到NVIDIA显卡，但无法启用CUDA")
+            print("⚠️ 请确保安装了正确的CUDA版本和支持CUDA的PyTorch")
+            print("⚠️ 运行: pip uninstall torch torchvision torchaudio")
+            print("⚠️ 然后: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
+        else:
+            print("⚠️ 未检测到CUDA设备，将使用CPU处理（速度较慢）")
+            print("⚠️ 如果你有NVIDIA显卡，请确保已安装正确的CUDA和PyTorch版本")
+            print("⚠️ 提示: 可以尝试运行 'pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121'")
+        
+        return "cpu"
+    except Exception as e:
+        print(f"⚠️ CUDA检测出错: {e}")
+        print("⚠️ 将使用CPU处理（速度较慢）")
+        return "cpu"
+
+# 确定设备
+DEVICE = check_cuda_availability()
 
 # === 加载模型 & 启动 Qdrant ===
 print("🔍 加载模型与数据库...")
-model = SentenceTransformer(MODEL_NAME)
-client = QdrantClient(path="./qdrant_data")
-client.recreate_collection(
-    collection_name=COLLECTION_NAME,
-    vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
-)
+try:
+    # 先加载模型，确保模型完全下载
+    print("正在加载模型，首次运行可能需要下载模型文件...")
+    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    print("✓ 模型加载完成")
+    
+    # 然后初始化数据库
+    print("正在初始化向量数据库...")
+    client = QdrantClient(path="./qdrant_data")
+    
+    # 检查集合是否存在，不存在则创建
+    if not client.collection_exists(COLLECTION_NAME):
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
+        )
+        print(f"✓ 创建集合 {COLLECTION_NAME}")
+    else:
+        # 如果需要重建集合，取消下面的注释
+        # client.delete_collection(collection_name=COLLECTION_NAME)
+        # client.create_collection(
+        #     collection_name=COLLECTION_NAME,
+        #     vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
+        # )
+        print(f"✓ 使用现有集合 {COLLECTION_NAME}")
+    
+    print("✓ 数据库初始化完成")
+except Exception as e:
+    print(f"❌ 初始化失败: {e}")
+    sys.exit(1)
 
 # === Markdown 分段函数 ===
-def split_markdown_chunks(markdown_text: str, chunk_size: int = CHUNK_SIZE, overlap: int = 50):
+def split_markdown_chunks(markdown_text: str, chunk_size: int = CHUNK_SIZE, overlap: int = 100):
     """
     智能分割 Markdown 文本为多个语义块
     
@@ -76,6 +181,8 @@ def split_markdown_chunks(markdown_text: str, chunk_size: int = CHUNK_SIZE, over
             else:
                 current_headers.append(title)
                 
+            # 将标题也添加到当前内容中，增强语义连贯性
+            current_content.append(line)
             continue
             
         # 处理列表项
@@ -93,7 +200,7 @@ def split_markdown_chunks(markdown_text: str, chunk_size: int = CHUNK_SIZE, over
         header_text = " > ".join(current_headers) if current_headers else ""
         blocks.append((header_text, "\n".join(current_content).strip()))
     
-    # 第二步：处理过长的内容块
+    # 第二步：处理过长的内容块，使用滑动窗口而不是固定大小
     final_chunks = []
     for header, content in blocks:
         if len(content) <= chunk_size:
@@ -103,24 +210,32 @@ def split_markdown_chunks(markdown_text: str, chunk_size: int = CHUNK_SIZE, over
             paragraphs = re.split(r'\n\s*\n', content)
             
             if len(max(paragraphs, key=len)) > chunk_size:
-                # 如果段落仍然太长，按句子分割
+                # 如果段落仍然太长，使用滑动窗口
                 buffer = ""
                 # 同时处理中英文句号
                 parts = re.split(r'(?<=[。！？.!?])\s*', content)
+                
+                window = []
+                window_size = 0
                 
                 for p in parts:
                     if not p.strip():
                         continue
                     
-                    if len(buffer) + len(p) < chunk_size:
-                        buffer += p
-                    else:
-                        if buffer:
-                            final_chunks.append((header, buffer.strip()))
-                        buffer = p
+                    window.append(p)
+                    window_size += len(p)
+                    
+                    if window_size >= chunk_size:
+                        final_chunks.append((header, "".join(window).strip()))
+                        # 滑动窗口，保留后半部分
+                        overlap_size = 0
+                        while window and overlap_size < overlap:
+                            part = window.pop(0)
+                            overlap_size += len(part)
+                        window_size = sum(len(p) for p in window)
                 
-                if buffer:  # 添加最后一个缓冲区
-                    final_chunks.append((header, buffer.strip()))
+                if window:  # 添加最后一个窗口
+                    final_chunks.append((header, "".join(window).strip()))
             else:
                 # 按段落分割并添加重叠
                 buffer = ""
