@@ -2,42 +2,36 @@ import os
 import sys
 from pathlib import Path
 
-# === 配置项 ===
-COLLECTION_NAME = "obsidian_notes"
-MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 必须与生成向量时使用的模型一致
-TOP_K = 8  # 增加返回结果数量
-SCORE_THRESHOLD = 0.45  # 降低相似度阈值，增加召回率
-ROOT_DIR = Path("D:/Notes")  # 笔记根目录
-# 离线模式配置
-OFFLINE_MODE = False  # 设置为True启用离线模式，不会检查模型更新
-# 本地模型路径（如果有）
-LOCAL_MODEL_PATH = "./models/bge-large-zh"  # 如果有本地模型，指定路径
+# 导入配置文件
+try:
+    from config import (
+        ROOT_DIR, COLLECTION_NAME, MODEL_NAME, 
+        TOP_K, SCORE_THRESHOLD, FORCE_CPU,
+        OFFLINE_MODE, LOCAL_MODEL_PATH, set_offline_mode
+    )
+except ImportError:
+    print("错误: 未找到配置文件 config.py")
+    sys.exit(1)
 
 # 处理命令行参数
 import argparse
 parser = argparse.ArgumentParser(description="搜索向量化的笔记")
 parser.add_argument("query", nargs="?", help="搜索关键词")
 parser.add_argument("--offline", action="store_true", help="启用离线模式，使用本地缓存模型")
+parser.add_argument("--cpu", action="store_true", help="强制使用CPU进行计算，即使有GPU可用")
 args = parser.parse_args()
 
 if args.offline:
     OFFLINE_MODE = True
     print("已启用离线模式")
 
+if args.cpu:
+    FORCE_CPU = True
+    print("已启用强制CPU模式")
+
 # 设置离线模式环境变量（必须在导入模块前设置）
 if OFFLINE_MODE:
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["SENTENCE_TRANSFORMERS_HOME"] = "./models"  # 指定模型缓存目录
-    print("已设置离线模式环境变量")
-    
-    # 检查本地模型目录是否存在
-    if LOCAL_MODEL_PATH and os.path.exists(LOCAL_MODEL_PATH):
-        print(f"使用本地模型: {LOCAL_MODEL_PATH}")
-        MODEL_NAME = LOCAL_MODEL_PATH
-    else:
-        print(f"警告: 未找到本地模型 {LOCAL_MODEL_PATH}")
-        print("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+    set_offline_mode(verbose=True)  # 在主脚本中保留日志输出
 
 # 导入其他模块
 import torch
@@ -57,6 +51,11 @@ console = Console()
 # === 检测CUDA可用性 ===
 def check_cuda_availability():
     """检测是否有可用的CUDA设备，特别针对Windows环境优化"""
+    # 如果强制使用CPU，直接返回
+    if FORCE_CPU:
+        console.print("[bold yellow]⚠️ 已启用强制CPU模式，将使用CPU进行计算[/bold yellow]")
+        return "cpu"
+        
     try:
         # 尝试直接获取CUDA设备信息
         if torch.cuda.is_available():
@@ -135,7 +134,22 @@ try:
     DEVICE = check_cuda_availability()
     
     print("正在加载模型，首次运行可能需要下载模型文件...")
-    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    
+    # 检查本地模型目录是否存在（如果在离线模式下）
+    if OFFLINE_MODE:
+        print("正在离线模式下加载模型...")
+        if os.path.exists(LOCAL_MODEL_PATH):
+            print(f"找到本地模型: {LOCAL_MODEL_PATH}")
+            # 使用本地模型路径
+            model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
+        else:
+            console.print(f"[bold red]错误: 未找到本地模型: {LOCAL_MODEL_PATH}[/bold red]")
+            console.print("[bold yellow]请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录[/bold yellow]")
+            sys.exit(1)
+    else:
+        # 正常模式下加载在线模型
+        model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    
     print("✓ 模型加载完成")
     
     print("正在连接向量数据库...")
@@ -162,13 +176,18 @@ def enhance_query(query: str):
     
     return enhanced_query
 
-def search_notes(query: str):
+def search_notes(query: str, model=None, client=None):
     """搜索笔记"""
-    # 加载模型
-    device = check_cuda_availability()
-    console.print("正在加载模型，首次运行可能需要下载模型文件...")
-    model = SentenceTransformer(MODEL_NAME, device=device)
-    console.print("✓ 模型加载完成", style="green")
+    # 如果没有传入模型和客户端，则使用全局变量
+    if model is None or client is None:
+        # 这里不再重新加载模型和客户端，而是使用全局已加载的
+        console.print("[bold yellow]警告: 未传入模型或客户端，使用全局变量[/bold yellow]")
+        # 确保全局变量已定义
+        if 'model' not in globals() or 'client' not in globals():
+            console.print("[bold red]错误: 全局模型或客户端未初始化[/bold red]")
+            sys.exit(1)
+        model = globals()['model']
+        client = globals()['client']
     
     # 增强查询
     enhanced_query = enhance_query(query)
@@ -354,13 +373,21 @@ def search_notes(query: str):
         console.print("─" * 80)
 
 def main():
-    if not args.query:
-        console.print("请提供搜索关键词")
-        console.print("使用方法: python search_notes.py <关键词> [--offline]")
-        return
+    """主函数"""
+    # 使用全局变量
+    global model, client
     
-    query = args.query
-    search_notes(query)
+    # 获取命令行参数
+    if len(sys.argv) < 2 and not args.query:
+        console.print("[bold red]请提供搜索关键词[/bold red]")
+        console.print("用法: python search_notes.py \"搜索关键词\"")
+        sys.exit(1)
+    
+    # 获取查询文本
+    query = args.query if args.query else " ".join(sys.argv[1:])
+    
+    # 使用全局已加载的模型和客户端进行搜索
+    search_notes(query, model, client)
 
 if __name__ == "__main__":
     main()

@@ -5,22 +5,17 @@ import os
 import sys
 from pathlib import Path
 
-# === 配置项 ===
-ROOT_DIR = Path("D:/Notes")  # <-- ⚠️ 修改为你的 Obsidian 根目录路径
-EXTENSIONS = [".md"]
-CHUNK_SIZE = 1024
-COLLECTION_NAME = "obsidian_notes"
-# 升级到更强大的模型
-MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 或者 "text2vec-large-chinese"
-VECTOR_DIM = 1024  # 修改为模型的实际输出维度
-# 增量更新配置
-INDEX_FILE = "./note_index.json"  # 文件索引，记录文件修改时间
-FORCE_REINDEX = False  # 设置为True强制重新索引所有文件
-MD5_FILE_SIZE_THRESHOLD = 1024 * 1024 * 5  # 5MB，超过此大小的文件不计算MD5
-# 离线模式配置
-OFFLINE_MODE = False  # 设置为True启用离线模式，不会检查模型更新
-# 本地模型路径（如果有）
-LOCAL_MODEL_PATH = "./models/bge-large-zh"  # 如果有本地模型，指定路径
+# 导入配置文件
+try:
+    from config import (
+        ROOT_DIR, EXTENSIONS, CHUNK_SIZE, COLLECTION_NAME, 
+        MODEL_NAME, VECTOR_DIM, FORCE_CPU, 
+        INDEX_FILE, FORCE_REINDEX, MD5_FILE_SIZE_THRESHOLD,
+        OFFLINE_MODE, LOCAL_MODEL_PATH, set_offline_mode
+    )
+except ImportError:
+    print("错误: 未找到配置文件 config.py")
+    sys.exit(1)
 
 # 处理命令行参数
 if __name__ == "__main__":
@@ -28,6 +23,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="扫描并向量化Markdown笔记")
     parser.add_argument("--force", action="store_true", help="强制重新索引所有文件")
     parser.add_argument("--offline", action="store_true", help="启用离线模式，使用本地缓存模型")
+    parser.add_argument("--cpu", action="store_true", help="强制使用CPU进行计算，即使有GPU可用")
     parser.add_argument("--show-help", action="store_true", help="显示帮助信息")
     args = parser.parse_args()
     
@@ -39,28 +35,22 @@ if __name__ == "__main__":
         OFFLINE_MODE = True
         print("⚠️ 已启用离线模式")
         
+    if args.cpu:
+        FORCE_CPU = True
+        print("⚠️ 已启用强制CPU模式")
+        
     if args.show_help:
         print("使用方法:")
         print("  python scan_and_embed_notes.py            # 增量更新，只处理新增或修改的文件")
         print("  python scan_and_embed_notes.py --force    # 强制重新索引所有文件")
         print("  python scan_and_embed_notes.py --offline  # 启用离线模式，使用本地缓存模型")
+        print("  python scan_and_embed_notes.py --cpu      # 强制使用CPU进行计算，即使有GPU可用")
         print("  python scan_and_embed_notes.py --show-help # 显示帮助信息")
         sys.exit(0)
 
 # 设置离线模式环境变量（必须在导入模块前设置）
 if OFFLINE_MODE:
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["SENTENCE_TRANSFORMERS_HOME"] = "./models"  # 指定模型缓存目录
-    print("已设置离线模式环境变量")
-    
-    # 检查本地模型目录是否存在
-    if LOCAL_MODEL_PATH and os.path.exists(LOCAL_MODEL_PATH):
-        print(f"使用本地模型: {LOCAL_MODEL_PATH}")
-        MODEL_NAME = LOCAL_MODEL_PATH
-    else:
-        print(f"警告: 未找到本地模型 {LOCAL_MODEL_PATH}")
-        print("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+    set_offline_mode(verbose=True)  # 在主脚本中保留日志输出
 
 # 导入其他模块
 import hashlib
@@ -78,6 +68,11 @@ from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, Fi
 # === 检测CUDA可用性 ===
 def check_cuda_availability():
     """检测是否有可用的CUDA设备，特别针对Windows环境优化"""
+    # 如果强制使用CPU，直接返回
+    if FORCE_CPU:
+        print("⚠️ 已启用强制CPU模式，将使用CPU进行计算")
+        return "cpu"
+        
     try:
         # 尝试直接获取CUDA设备信息
         if torch.cuda.is_available():
@@ -159,7 +154,21 @@ try:
     # 先加载模型，确保模型完全下载
     print("正在加载模型，首次运行可能需要下载模型文件...")
     
-    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    # 检查本地模型目录是否存在（如果在离线模式下）
+    if OFFLINE_MODE:
+        print("正在离线模式下加载模型...")
+        if os.path.exists(LOCAL_MODEL_PATH):
+            print(f"找到本地模型: {LOCAL_MODEL_PATH}")
+            # 使用本地模型路径
+            model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
+        else:
+            print(f"错误: 未找到本地模型: {LOCAL_MODEL_PATH}")
+            print("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+            sys.exit(1)
+    else:
+        # 正常模式下加载在线模型
+        model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    
     print("✓ 模型加载完成")
     
     # 然后初始化数据库

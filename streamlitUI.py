@@ -5,6 +5,22 @@ import json
 # 必须是第一个 Streamlit 命令
 st.set_page_config(page_title="Obsidian 搜索", layout="wide")
 
+# 导入配置文件
+try:
+    from config import (
+        ROOT_DIR, COLLECTION_NAME, MODEL_NAME, 
+        FORCE_CPU, OFFLINE_MODE, LOCAL_MODEL_PATH, 
+        set_offline_mode
+    )
+    # 设置离线模式环境变量（不输出日志）
+    if OFFLINE_MODE:
+        set_offline_mode(verbose=False)
+    # 将Path对象转换为字符串
+    VAULT_ROOT = str(ROOT_DIR)
+except ImportError:
+    st.error("错误: 未找到配置文件 config.py")
+    st.stop()
+
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 import re
@@ -144,11 +160,6 @@ except ImportError:
     st.sidebar.warning("⚠️ 未安装 markdown-it-py 或 pygments 库，将使用基本 Markdown 渲染")
     st.sidebar.info("可以通过运行 `pip install markdown-it-py pygments mdformat` 安装所需库")
 
-# 配置
-COLLECTION_NAME = "obsidian_notes"
-MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 升级到更强大的模型
-VAULT_ROOT = "D:/Notes"  # ← 修改为你本地笔记库路径
-
 # 应用程序打开函数
 def open_file_with_app(file_path):
     """使用系统默认应用程序打开文件"""
@@ -165,6 +176,11 @@ def open_file_with_app(file_path):
 # === 检测CUDA可用性 ===
 def check_cuda_availability():
     """检测是否有可用的CUDA设备，特别针对Windows环境优化"""
+    # 如果强制使用CPU，直接返回
+    if FORCE_CPU:
+        st.sidebar.warning("⚠️ 已启用强制CPU模式，将使用CPU进行计算")
+        return "cpu"
+        
     try:
         # 尝试直接获取CUDA设备信息
         if torch.cuda.is_available():
@@ -245,8 +261,35 @@ DEVICE = check_cuda_availability()
 def load_model_and_client():
     """加载模型和数据库客户端"""
     try:
-        model = SentenceTransformer(MODEL_NAME, device=DEVICE)
-        client = QdrantClient(path="./qdrant_data")
+        # 检查本地模型目录是否存在（如果在离线模式下）
+        if OFFLINE_MODE:
+            st.info(f"正在离线模式下加载模型...")
+            if os.path.exists(LOCAL_MODEL_PATH):
+                st.success(f"找到本地模型: {LOCAL_MODEL_PATH}")
+                # 使用本地模型路径
+                model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
+            else:
+                st.error(f"未找到本地模型: {LOCAL_MODEL_PATH}")
+                st.error("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+                return None, None
+        else:
+            # 正常模式下加载在线模型
+            model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+        
+        # 尝试连接本地数据库
+        if os.path.exists("./qdrant_data"):
+            client = QdrantClient(path="./qdrant_data")
+            # 检查集合是否存在
+            if not client.collection_exists(COLLECTION_NAME):
+                st.warning(f"⚠️ 集合 {COLLECTION_NAME} 不存在，请先运行 scan_and_embed_notes.py 创建索引")
+                # 创建临时内存数据库
+                client = QdrantClient(":memory:")
+                st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 创建索引。")
+        else:
+            st.warning("⚠️ 未找到向量数据库文件，使用临时内存数据库")
+            client = QdrantClient(":memory:")
+            st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 创建索引。")
+        
         return model, client
     except Exception as e:
         st.error(f"加载模型或数据库时出错: {str(e)}")
@@ -255,7 +298,12 @@ def load_model_and_client():
             # 尝试重新创建数据库连接
             client = QdrantClient(":memory:")  # 临时使用内存数据库
             st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 重建索引。")
-            model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+            
+            # 在离线模式下再次尝试加载本地模型
+            if OFFLINE_MODE and os.path.exists(LOCAL_MODEL_PATH):
+                model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
+            else:
+                model = SentenceTransformer(MODEL_NAME, device=DEVICE)
             return model, client
         except Exception as e2:
             st.error(f"无法创建临时数据库: {str(e2)}")
@@ -435,6 +483,26 @@ if query:
             raw_path = hit.payload["source"]
             content = hit.payload["text"]
             
+            # 文档路径信息
+            abs_path = Path(raw_path).resolve()
+            
+            # 添加文件路径和打开按钮（移到顶部）
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                if show_full_path:
+                    st.markdown(f"**📎 文件路径：** {raw_path}", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**📎 文件名：** {abs_path.name}", unsafe_allow_html=True)
+            with col2:
+                if st.button("🔗 打开文件", key=f"link_{raw_path}"):
+                    # 使用系统默认方式打开文件
+                    success, error = open_file_with_app(str(abs_path))
+                    if not success:
+                        st.error(f"打开失败: {error}")
+            
+            # 显示相似度
+            st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)
+            
             # 尝试读取原始文件以获取更完整的内容
             if use_original_file:
                 try:
@@ -538,24 +606,7 @@ if query:
                     # 添加JavaScript
                     st.components.v1.html(highlight_js, height=0)
             
-            # 文档跳转链接
-            abs_path = Path(raw_path).resolve()
-
-            # 添加文件路径和打开按钮
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                if show_full_path:
-                    st.markdown(f"**📎 文件路径：** {raw_path}", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"**📎 文件名：** {abs_path.name}", unsafe_allow_html=True)
-            with col2:
-                if st.button("🔗 打开文件", key=f"link_{raw_path}"):
-                    # 使用系统默认方式打开文件
-                    success, error = open_file_with_app(str(abs_path))
-                    if not success:
-                        st.error(f"打开失败: {error}")
-            
-            st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)
+            # 添加分隔线
             st.markdown("---")
     else:
         st.warning("没有找到相关内容。")
