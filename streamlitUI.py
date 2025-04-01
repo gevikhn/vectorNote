@@ -450,7 +450,7 @@ if model is None or client is None:
     st.stop()
 
 # UI
-st.title("🔍 Obsidian 笔记语义搜索")
+st.title("🔍 文档语义搜索")
 
 # 添加自定义CSS样式
 st.markdown("""

@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 # === 基础配置 ===
-ROOT_DIR = Path("D:/Notes")  # 笔记根目录路径
+ROOT_DIR = Path("./doc")  # 笔记根目录路径
 EXTENSIONS = [".md"]  # 支持的文件扩展名
 COLLECTION_NAME = "obsidian_notes"  # 向量数据库集合名称
 
@@ -18,7 +18,7 @@ COLLECTION_NAME = "obsidian_notes"  # 向量数据库集合名称
 MODEL_NAME = "BAAI/bge-m3"  # 向量化模型名称
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-large"  # 重排序模型名称
 VECTOR_DIM = 1024  # 向量维度
-FORCE_CPU = False  # 是否强制使用CPU，即使有GPU可用
+FORCE_CPU = True  # 是否强制使用CPU，即使有GPU可用
 
 # === 索引配置 ===
 CHUNK_SIZE = 512  # 文本分块大小
@@ -36,9 +36,9 @@ ENABLE_RERANKING = True  # 是否启用重排序功能
 SHOW_OPEN_FILE_BUTTON = False  # 是否显示"打开文件"按钮
 
 # === 离线模式配置 ===
-OFFLINE_MODE = False  # 是否启用离线模式
-LOCAL_MODEL_PATH = "./models/bge-m3"  # 本地模型路径
-LOCAL_RERANKER_PATH = "./models/bge-reranker-large"  # 本地重排序模型路径
+OFFLINE_MODE = True  # 是否启用离线模式
+LOCAL_MODEL_PATH = "./model/bge-m3"  # 本地模型路径
+LOCAL_RERANKER_PATH = "./model/bge-reranker-large"  # 本地重排序模型路径
 
 # === 设置离线模式环境变量 ===
 def set_offline_mode(verbose=True):

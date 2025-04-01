@@ -1,1 +1,6 @@
 qdrant_data
+venv
+model
+doc
+__pycache__
+note_index.json
