@@ -8,8 +8,9 @@ st.set_page_config(page_title="Obsidian 搜索", layout="wide")
 # 导入配置文件
 try:
     from config import (
-        ROOT_DIR, COLLECTION_NAME, MODEL_NAME, 
-        FORCE_CPU, OFFLINE_MODE, LOCAL_MODEL_PATH, 
+        ROOT_DIR, COLLECTION_NAME, MODEL_NAME, RERANKER_MODEL_NAME,
+        FORCE_CPU, OFFLINE_MODE, LOCAL_MODEL_PATH, LOCAL_RERANKER_PATH,
+        TOP_K, RERANK_TOP_K, SCORE_THRESHOLD,
         set_offline_mode
     )
     # 设置离线模式环境变量（不输出日志）
@@ -21,7 +22,7 @@ except ImportError:
     st.error("错误: 未找到配置文件 config.py")
     st.stop()
 
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from qdrant_client import QdrantClient
 import re
 import urllib.parse
@@ -264,17 +265,35 @@ def load_model_and_client():
         # 检查本地模型目录是否存在（如果在离线模式下）
         if OFFLINE_MODE:
             st.info(f"正在离线模式下加载模型...")
+            # 加载嵌入模型
             if os.path.exists(LOCAL_MODEL_PATH):
-                st.success(f"找到本地模型: {LOCAL_MODEL_PATH}")
+                st.success(f"找到本地嵌入模型: {LOCAL_MODEL_PATH}")
                 # 使用本地模型路径
                 model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
             else:
-                st.error(f"未找到本地模型: {LOCAL_MODEL_PATH}")
+                st.error(f"未找到本地嵌入模型: {LOCAL_MODEL_PATH}")
                 st.error("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
-                return None, None
+                return None, None, None
+                
+            # 加载重排序模型
+            if os.path.exists(LOCAL_RERANKER_PATH):
+                st.success(f"找到本地重排序模型: {LOCAL_RERANKER_PATH}")
+                # 使用本地重排序模型路径
+                reranker = CrossEncoder(LOCAL_RERANKER_PATH, device=DEVICE)
+            else:
+                st.warning(f"未找到本地重排序模型: {LOCAL_RERANKER_PATH}")
+                st.warning("将仅使用向量检索，不进行重排序")
+                reranker = None
         else:
             # 正常模式下加载在线模型
             model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+            try:
+                reranker = CrossEncoder(RERANKER_MODEL_NAME, device=DEVICE)
+                st.success("✓ 重排序模型加载完成")
+            except Exception as e:
+                st.warning(f"加载重排序模型失败: {e}")
+                st.warning("将仅使用向量检索，不进行重排序")
+                reranker = None
         
         # 尝试连接本地数据库
         if os.path.exists("./qdrant_data"):
@@ -290,7 +309,7 @@ def load_model_and_client():
             client = QdrantClient(":memory:")
             st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 创建索引。")
         
-        return model, client
+        return model, client, reranker
     except Exception as e:
         st.error(f"加载模型或数据库时出错: {str(e)}")
         st.info("尝试重新初始化数据库...")
@@ -302,16 +321,26 @@ def load_model_and_client():
             # 在离线模式下再次尝试加载本地模型
             if OFFLINE_MODE and os.path.exists(LOCAL_MODEL_PATH):
                 model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
+                
+                # 尝试加载重排序模型
+                if os.path.exists(LOCAL_RERANKER_PATH):
+                    reranker = CrossEncoder(LOCAL_RERANKER_PATH, device=DEVICE)
+                else:
+                    reranker = None
             else:
                 model = SentenceTransformer(MODEL_NAME, device=DEVICE)
-            return model, client
+                try:
+                    reranker = CrossEncoder(RERANKER_MODEL_NAME, device=DEVICE)
+                except Exception:
+                    reranker = None
+            return model, client, reranker
         except Exception as e2:
             st.error(f"无法创建临时数据库: {str(e2)}")
             # 返回None，后续代码需要处理None的情况
-            return None, None
+            return None, None, None
 
 # 加载模型和客户端
-model, client = load_model_and_client()
+model, client, reranker = load_model_and_client()
 
 # 检查模型和客户端是否成功加载
 if model is None or client is None:
@@ -377,8 +406,8 @@ def enhance_query(query: str):
     # 1. 去除多余空格和标点
     query = re.sub(r'\s+', ' ', query).strip()
     
-    # 2. 添加查询前缀，提高检索质量（BGE模型特性）
-    enhanced_query = f"查询：{query}"
+    # 2. 不再添加查询前缀，因为BGE-M3不需要
+    enhanced_query = query
     
     return enhanced_query
 
@@ -519,91 +548,83 @@ if query:
     # 应用查询增强
     enhanced_query = enhance_query(query)
     
-    # 将查询文本转换为向量
-    query_vector = model.encode(enhanced_query).tolist()
-    
+    # 搜索
     with st.spinner("正在搜索..."):
-        # 获取更多结果，后面会重排序
-        results = client.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            limit=top_k * 3,
-            score_threshold=score_threshold  # 降低相似度阈值，增加召回率
-        ).points
-        
-        # 文件名精确匹配搜索（优先显示）
-        file_matches = []
-        query_terms = query.lower().split()
-        
-        # 根据文件路径和文件名进行匹配
-        for result in results:
-            # 检查是否是文件名向量点
-            is_filename_only = result.payload.get("is_filename_only", False)
+        try:
+            # 将查询文本转换为向量
+            query_vector = model.encode(enhanced_query)
             
-            # 获取文件名
-            filename = result.payload.get("filename", "")
-            if not filename:
-                source_path = Path(result.payload["source"])
-                filename = source_path.name
+            # 在 Qdrant 中搜索最相似的文档 (第一阶段：检索)
+            search_result = client.query_points(
+                collection_name=COLLECTION_NAME,
+                query=query_vector,
+                limit=TOP_K,  # 检索更多结果用于重排序
+                with_payload=True,
+            )
+            
+            # 如果没有找到结果，提示用户
+            if not search_result:
+                st.warning("没有找到相关内容。")
+                st.stop()
+            
+            # 准备重排序 (第二阶段：重排序)
+            if reranker is not None:
+                with st.spinner("正在重排序结果..."):
+                    # 提取检索到的文档和查询，准备重排序
+                    passages = [hit.payload.get("text", "") for hit in search_result]
+                    
+                    # 创建查询-文档对，用于重排序
+                    query_passage_pairs = [[query, passage] for passage in passages]
+                    
+                    # 使用重排序模型计算相关性分数
+                    rerank_scores = reranker.predict(query_passage_pairs)
+                    
+                    # 将重排序分数与检索结果合并
+                    for i, hit in enumerate(search_result):
+                        hit.score = float(rerank_scores[i])  # 更新为重排序分数
+                    
+                    # 按重排序分数重新排序
+                    search_result = sorted(search_result, key=lambda x: x.score, reverse=True)
+                    
+                    # 只保留前RERANK_TOP_K个结果
+                    search_result = search_result[:RERANK_TOP_K]
+            
+            # 过滤掉低于阈值的结果
+            results = [hit for hit in search_result if hit.score > SCORE_THRESHOLD]
+            
+            # 文件名精确匹配搜索（优先显示）
+            file_matches = []
+            query_terms = query.lower().split()
+            
+            # 根据文件路径和文件名进行匹配
+            for result in results:
+                # 检查是否是文件名向量点
+                is_filename_only = result.payload.get("is_filename_only", False)
                 
-            filename_lower = filename.lower()
+                # 获取文件名
+                filename = result.payload.get("filename", "")
+                if not filename:
+                    source_path = Path(result.payload["source"])
+                    filename = source_path.name
+                    
+                filename_lower = filename.lower()
+                
+                # 文件名向量点优先级更高
+                if is_filename_only and all(term in filename_lower for term in query_terms):
+                    file_matches.insert(0, result)  # 插入到最前面
+                # 普通向量点但文件名匹配
+                elif all(term in filename_lower for term in query_terms):
+                    file_matches.append(result)
             
-            # 文件名向量点优先级更高
-            if is_filename_only and all(term in filename_lower for term in query_terms):
-                file_matches.insert(0, result)  # 插入到最前面
-            # 普通向量点但文件名匹配
-            elif all(term in filename_lower for term in query_terms):
-                file_matches.append(result)
-        
-        # 重排序结果：结合相似度分数和关键词匹配度
-        def rerank_score(result):
-            base_score = result.score
-            text = result.payload["text"].lower()
+            # 合并结果
+            combined_results = file_matches + [r for r in results if r not in file_matches]
             
-            # 计算关键词匹配度
-            keyword_bonus = 0
-            for term in query_terms:
-                if term in text:
-                    # 根据关键词出现的位置给予不同权重
-                    # 标题中出现的关键词权重更高
-                    if term in text.split('\n')[0]:
-                        keyword_bonus += 0.1
-                    else:
-                        keyword_bonus += 0.05
-            
-            # 文件名匹配加分
-            filename_bonus = 0
-            filename = result.payload.get("filename", "").lower()
-            if any(term in filename for term in query_terms):
-                filename_bonus = 0.15
-            
-            # 是否为文件名向量点
-            is_filename_only = result.payload.get("is_filename_only", False)
-            filename_only_bonus = 0.2 if is_filename_only and any(term in filename for term in query_terms) else 0
-            
-            # 最终分数
-            final_score = base_score + keyword_bonus + filename_bonus + filename_only_bonus
-            return final_score
+            # 使用重排序后的结果
+            results = combined_results
+        except Exception as e:
+            st.error(f"搜索过程中出错: {str(e)}")
+            st.stop()
         
-        # 合并结果
-        combined_results = file_matches + [r for r in results if r not in file_matches]
-        
-        # 根据重排序分数排序
-        combined_results.sort(key=rerank_score, reverse=True)
-        
-        # 去重并限制结果数量
-        unique_results = []
-        unique_paths = set()
-        
-        for result in combined_results:
-            source = result.payload["source"]
-            if source not in unique_paths and len(unique_results) < top_k:
-                unique_paths.add(source)
-                unique_results.append(result)
-        
-        # 使用重排序后的结果
-        results = unique_results
-
     if results:
         st.subheader("📄 匹配结果：")
 

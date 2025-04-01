@@ -5,9 +5,9 @@ from pathlib import Path
 # 导入配置文件
 try:
     from config import (
-        ROOT_DIR, COLLECTION_NAME, MODEL_NAME, 
-        TOP_K, SCORE_THRESHOLD, FORCE_CPU,
-        OFFLINE_MODE, LOCAL_MODEL_PATH, set_offline_mode
+        ROOT_DIR, COLLECTION_NAME, MODEL_NAME, RERANKER_MODEL_NAME,
+        TOP_K, RERANK_TOP_K, SCORE_THRESHOLD, FORCE_CPU,
+        OFFLINE_MODE, LOCAL_MODEL_PATH, LOCAL_RERANKER_PATH, set_offline_mode
     )
 except ImportError:
     print("错误: 未找到配置文件 config.py")
@@ -39,7 +39,7 @@ import hashlib
 import uuid
 import json
 from datetime import datetime
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 from rich.console import Console
@@ -138,17 +138,35 @@ try:
     # 检查本地模型目录是否存在（如果在离线模式下）
     if OFFLINE_MODE:
         print("正在离线模式下加载模型...")
+        # 加载嵌入模型
         if os.path.exists(LOCAL_MODEL_PATH):
-            print(f"找到本地模型: {LOCAL_MODEL_PATH}")
+            print(f"找到本地嵌入模型: {LOCAL_MODEL_PATH}")
             # 使用本地模型路径
             model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
         else:
-            console.print(f"[bold red]错误: 未找到本地模型: {LOCAL_MODEL_PATH}[/bold red]")
+            console.print(f"[bold red]错误: 未找到本地嵌入模型: {LOCAL_MODEL_PATH}[/bold red]")
             console.print("[bold yellow]请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录[/bold yellow]")
             sys.exit(1)
+            
+        # 加载重排序模型
+        if os.path.exists(LOCAL_RERANKER_PATH):
+            print(f"找到本地重排序模型: {LOCAL_RERANKER_PATH}")
+            # 使用本地重排序模型路径
+            reranker = CrossEncoder(LOCAL_RERANKER_PATH, device=DEVICE)
+        else:
+            console.print(f"[bold yellow]警告: 未找到本地重排序模型: {LOCAL_RERANKER_PATH}[/bold yellow]")
+            console.print("[bold yellow]将仅使用向量检索，不进行重排序[/bold yellow]")
+            reranker = None
     else:
         # 正常模式下加载在线模型
         model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+        try:
+            reranker = CrossEncoder(RERANKER_MODEL_NAME, device=DEVICE)
+            print("✓ 重排序模型加载完成")
+        except Exception as e:
+            console.print(f"[bold yellow]警告: 加载重排序模型失败: {e}[/bold yellow]")
+            console.print("[bold yellow]将仅使用向量检索，不进行重排序[/bold yellow]")
+            reranker = None
     
     print("✓ 模型加载完成")
     
@@ -171,13 +189,13 @@ def enhance_query(query: str):
     # 1. 去除多余空格和标点
     query = re.sub(r'\s+', ' ', query).strip()
     
-    # 2. 添加查询前缀，提高检索质量（BGE模型特性）
-    enhanced_query = f"查询：{query}"
+    # 2. 不再添加查询前缀，因为BGE-M3不需要
+    enhanced_query = query
     
     return enhanced_query
 
-def search_notes(query: str, model=None, client=None):
-    """搜索笔记"""
+def search_notes(query: str, model=None, client=None, reranker=None):
+    """搜索笔记，使用混合检索+重排序的推荐管道"""
     # 如果没有传入模型和客户端，则使用全局变量
     if model is None or client is None:
         # 这里不再重新加载模型和客户端，而是使用全局已加载的
@@ -188,6 +206,8 @@ def search_notes(query: str, model=None, client=None):
             sys.exit(1)
         model = globals()['model']
         client = globals()['client']
+        if 'reranker' in globals():
+            reranker = globals()['reranker']
     
     # 增强查询
     enhanced_query = enhance_query(query)
@@ -195,187 +215,77 @@ def search_notes(query: str, model=None, client=None):
     # 将查询文本转换为向量
     query_vector = model.encode(enhanced_query)
     
-    # 在 Qdrant 中搜索最相似的文档
+    # 在 Qdrant 中搜索最相似的文档 (第一阶段：检索)
     search_result = client.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=TOP_K * 3,  # 获取更多结果，后面会过滤和重排序
-        score_threshold=SCORE_THRESHOLD  # 降低相似度阈值，增加召回率
-    ).points
+        limit=TOP_K,  # 检索更多结果用于重排序
+        with_payload=True,
+    )
     
-    # 显示搜索结果
-    console.print(f"\n🔍 搜索：[bold blue]{query}[/bold blue]\n")
+    # 如果没有找到结果，直接返回空列表
+    if not search_result:
+        return []
     
-    # 文件名精确匹配搜索（优先显示）
-    file_matches = []
-    query_terms = query.lower().split()
-    
-    # 根据文件路径和文件名进行匹配
-    for result in search_result:
-        # 检查是否是文件名向量点
-        is_filename_only = result.payload.get("is_filename_only", False)
+    # 准备重排序 (第二阶段：重排序)
+    if reranker is not None:
+        # 提取检索到的文档和查询，准备重排序
+        passages = [hit.payload.get("text", "") for hit in search_result]
         
-        # 获取文件名
-        filename = result.payload.get("filename", "")
-        if not filename:
-            source_path = Path(result.payload["source"])
-            filename = source_path.name
+        # 创建查询-文档对，用于重排序
+        query_passage_pairs = [[query, passage] for passage in passages]
+        
+        # 使用重排序模型计算相关性分数
+        rerank_scores = reranker.predict(query_passage_pairs)
+        
+        # 将重排序分数与检索结果合并
+        for i, hit in enumerate(search_result):
+            hit.score = float(rerank_scores[i])  # 更新为重排序分数
+        
+        # 按重排序分数重新排序
+        search_result = sorted(search_result, key=lambda x: x.score, reverse=True)
+        
+        # 只保留前RERANK_TOP_K个结果
+        search_result = search_result[:RERANK_TOP_K]
+    
+    # 过滤掉低于阈值的结果
+    search_result = [hit for hit in search_result if hit.score > SCORE_THRESHOLD]
+    
+    # 格式化结果
+    formatted_results = []
+    for hit in search_result:
+        payload = hit.payload
+        
+        # 提取文件路径和文本内容
+        file_path = payload.get("file_path", "未知路径")
+        text = payload.get("text", "")
+        
+        # 计算相对路径（如果是绝对路径）
+        if os.path.isabs(file_path) and str(ROOT_DIR) in file_path:
+            rel_path = os.path.relpath(file_path, ROOT_DIR)
+        else:
+            rel_path = file_path
             
-        filename_lower = filename.lower()
+        # 提取其他元数据
+        chunk_id = payload.get("chunk_id", "")
+        created_at = payload.get("created_at", "")
         
-        # 文件名向量点优先级更高
-        if is_filename_only and all(term in filename_lower for term in query_terms):
-            file_matches.insert(0, result)  # 插入到最前面
-        # 普通向量点但文件名匹配
-        elif all(term in filename_lower for term in query_terms):
-            file_matches.append(result)
+        # 添加到结果列表
+        formatted_results.append({
+            "score": hit.score,
+            "file_path": file_path,
+            "rel_path": rel_path,
+            "text": text,
+            "chunk_id": chunk_id,
+            "created_at": created_at
+        })
     
-    # 直接在文件系统中搜索匹配的文件（以防向量数据库中没有索引到）
-    if not file_matches and len(search_result) < 2:  # 只有在向量搜索结果很少时才执行
-        console.print("[dim]正在文件系统中搜索匹配文件...[/dim]")
-        for root, dirs, files in os.walk(ROOT_DIR):
-            for file in files:
-                if file.lower().endswith('.md') and all(term in file.lower() for term in query_terms):
-                    full_path = os.path.join(root, file)
-                    try:
-                        # 读取文件内容
-                        with open(full_path, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        
-                        # 直接显示文件系统搜索结果
-                        console.print(f"\n[bold yellow]文件系统匹配[/bold yellow]")
-                        console.print(f"[bold cyan]文件: {file}[/bold cyan]")
-                        
-                        # 提取文件的主要内容
-                        lines = content.split('\n')
-                        # 去除空行
-                        lines = [line for line in lines if line.strip()]
-                        
-                        # 提取前10行非空内容作为预览
-                        preview_lines = lines[:10]
-                        preview = '\n'.join(preview_lines)
-                        if len(lines) > 10:
-                            preview += "\n..."
-                        
-                        # 显示预览内容
-                        console.print("\n[bold]文件内容预览:[/bold]")
-                        for line in preview_lines:
-                            console.print(line)
-                            
-                        console.print(f"\n[dim]来源: {full_path}[/dim]\n")
-                        console.print("─" * 80)
-                        
-                    except Exception as e:
-                        console.print(f"[dim]读取文件 {full_path} 时出错: {e}[/dim]")
-    
-    # 重排序结果：结合相似度分数和关键词匹配度
-    def rerank_score(result):
-        base_score = result.score
-        text = result.payload["text"].lower()
-        
-        # 计算关键词匹配度
-        keyword_bonus = 0
-        for term in query_terms:
-            if term in text:
-                # 根据关键词出现的位置给予不同权重
-                # 标题中出现的关键词权重更高
-                if term in text.split('\n')[0]:
-                    keyword_bonus += 0.1
-                else:
-                    keyword_bonus += 0.05
-        
-        # 文件名匹配加分
-        filename_bonus = 0
-        filename = result.payload.get("filename", "").lower()
-        if any(term in filename for term in query_terms):
-            filename_bonus = 0.15
-        
-        # 是否为文件名向量点
-        is_filename_only = result.payload.get("is_filename_only", False)
-        filename_only_bonus = 0.2 if is_filename_only and any(term in filename for term in query_terms) else 0
-        
-        # 最终分数
-        final_score = base_score + keyword_bonus + filename_bonus + filename_only_bonus
-        return final_score
-    
-    # 合并结果，只使用向量搜索结果
-    combined_results = file_matches + [r for r in search_result if r not in file_matches]
-    
-    # 根据重排序分数排序
-    combined_results.sort(key=rerank_score, reverse=True)
-    
-    # 去重并限制结果数量
-    unique_results = []
-    unique_paths = set()
-    
-    for result in combined_results:
-        source = result.payload["source"]
-        if source not in unique_paths and len(unique_results) < TOP_K:
-            unique_paths.add(source)
-            unique_results.append(result)
-    
-    # 显示结果
-    if not unique_results:
-        console.print("[yellow]未找到相关结果[/yellow]")
-        return
-    
-    for i, result in enumerate(unique_results, 1):
-        score = result.score
-        text = result.payload["text"]
-        source = result.payload["source"]
-        
-        # 提取文件名作为额外显示
-        filename = Path(source).name
-        
-        # 显示结果标题
-        console.print(f"\n[bold green]结果 {i} (相似度: {score:.2f})[/bold green]")
-        console.print(f"[bold cyan]文件: {filename}[/bold cyan]")
-        console.print("\n")
-        
-        # 尝试读取原始文件内容
-        content_to_display = ""
-        try:
-            if os.path.exists(source):
-                with open(source, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                # 提取文件的前30行非空内容
-                lines = content.split('\n')
-                non_empty_lines = []
-                for line in lines:
-                    if line.strip():
-                        non_empty_lines.append(line)
-                    if len(non_empty_lines) >= 30:
-                        break
-                
-                if non_empty_lines:
-                    content_to_display = '\n'.join(non_empty_lines)
-                    if len(lines) > 30:
-                        content_to_display += "\n..."
-                else:
-                    content_to_display = text
-            else:
-                content_to_display = text
-        except Exception:
-            # 如果读取失败，使用向量数据库中的文本
-            content_to_display = text
-        
-        # 确保内容是字符串类型
-        if not isinstance(content_to_display, str):
-            try:
-                content_to_display = str(content_to_display)
-            except Exception:
-                content_to_display = "错误：无法显示内容，内容格式不正确"
-        
-        console.print(Markdown(content_to_display))
-        
-        console.print(f"\n[dim]来源: {source}[/dim]")
-        console.print("─" * 80)
+    return formatted_results
 
 def main():
     """主函数"""
     # 使用全局变量
-    global model, client
+    global model, client, reranker
     
     # 获取命令行参数
     if len(sys.argv) < 2 and not args.query:
@@ -387,7 +297,31 @@ def main():
     query = args.query if args.query else " ".join(sys.argv[1:])
     
     # 使用全局已加载的模型和客户端进行搜索
-    search_notes(query, model, client)
+    results = search_notes(query, model, client, reranker)
+    
+    # 显示结果
+    if not results:
+        console.print("[yellow]未找到相关结果[/yellow]")
+        return
+    
+    for i, result in enumerate(results, 1):
+        score = result["score"]
+        file_path = result["file_path"]
+        rel_path = result["rel_path"]
+        text = result["text"]
+        chunk_id = result["chunk_id"]
+        created_at = result["created_at"]
+        
+        # 显示结果标题
+        console.print(f"\n[bold green]结果 {i} (相似度: {score:.2f})[/bold green]")
+        console.print(f"[bold cyan]文件: {rel_path}[/bold cyan]")
+        console.print("\n")
+        
+        # 显示文本内容
+        console.print(Markdown(text))
+        
+        console.print(f"\n[dim]来源: {file_path}[/dim]")
+        console.print("─" * 80)
 
 if __name__ == "__main__":
     main()

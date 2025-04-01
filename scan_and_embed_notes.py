@@ -164,6 +164,7 @@ try:
         else:
             print(f"错误: 未找到本地模型: {LOCAL_MODEL_PATH}")
             print("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+            print(f"BGE-M3模型可以从 https://huggingface.co/BAAI/bge-m3 下载")
             sys.exit(1)
     else:
         # 正常模式下加载在线模型
@@ -770,7 +771,10 @@ for path in tqdm(all_files, desc="处理文件"):
             payload={
                 "text": sentences[i],
                 "source": str(path),
-                "filename": path.name  # 添加文件名到payload
+                "file_path": str(path),  # 添加file_path字段，与search_notes.py一致
+                "filename": path.name,  # 添加文件名到payload
+                "chunk_id": f"{path.name}-{i}",  # 添加chunk_id
+                "created_at": datetime.now().isoformat()  # 添加创建时间
             }
         ))
 
@@ -783,7 +787,10 @@ for path in tqdm(all_files, desc="处理文件"):
         payload={
             "text": f"# {processed_filename}",
             "source": str(path),
+            "file_path": str(path),  # 添加file_path字段，与search_notes.py一致
             "filename": path.name,
+            "chunk_id": f"{path.name}-filename",  # 添加chunk_id
+            "created_at": datetime.now().isoformat(),  # 添加创建时间
             "is_filename_only": True  # 标记这是一个仅包含文件名的向量点
         }
     ))

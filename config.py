@@ -15,7 +15,8 @@ EXTENSIONS = [".md"]  # 支持的文件扩展名
 COLLECTION_NAME = "obsidian_notes"  # 向量数据库集合名称
 
 # === 模型配置 ===
-MODEL_NAME = "BAAI/bge-large-zh-noinstruct"  # 向量化模型名称
+MODEL_NAME = "BAAI/bge-m3"  # 向量化模型名称
+RERANKER_MODEL_NAME = "BAAI/bge-reranker-large"  # 重排序模型名称
 VECTOR_DIM = 1024  # 向量维度
 FORCE_CPU = False  # 是否强制使用CPU，即使有GPU可用
 
@@ -26,12 +27,14 @@ FORCE_REINDEX = False  # 是否强制重新索引所有文件
 MD5_FILE_SIZE_THRESHOLD = 1024 * 1024 * 5  # 5MB，超过此大小的文件不计算MD5
 
 # === 搜索配置 ===
-TOP_K = 8  # 搜索结果数量
+TOP_K = 20  # 初始检索结果数量
+RERANK_TOP_K = 8  # 重排序后保留的结果数量
 SCORE_THRESHOLD = 0.45  # 相似度阈值
 
 # === 离线模式配置 ===
-OFFLINE_MODE = True  # 是否启用离线模式
-LOCAL_MODEL_PATH = "./models/bge-large-zh"  # 本地模型路径
+OFFLINE_MODE = False  # 是否启用离线模式
+LOCAL_MODEL_PATH = "./models/bge-m3"  # 本地模型路径
+LOCAL_RERANKER_PATH = "./models/bge-reranker-large"  # 本地重排序模型路径
 
 # === 设置离线模式环境变量 ===
 def set_offline_mode(verbose=True):
