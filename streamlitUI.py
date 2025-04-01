@@ -483,19 +483,89 @@ st.markdown("""
 
 # 侧边栏配置
 st.sidebar.header("⚙️ 搜索配置")
-top_k = st.sidebar.slider("返回结果数量", 1, 20, 5)
-score_threshold = st.sidebar.slider("相似度阈值", 0.0, 1.0, 0.45, 0.01)
-highlight_keywords = st.sidebar.checkbox("高亮关键词", value=True)
-show_full_path = st.sidebar.checkbox("显示完整文件路径", value=True)
+
+# 初始化会话状态变量，用于存储配置
+if 'config_initialized' not in st.session_state:
+    st.session_state.config_initialized = False
+
+# 初始化配置项的默认值
+default_config = {
+    'top_k': 5,
+    'score_threshold': 0.45,
+    'highlight_keywords': True,
+    'show_full_path': True,
+    'use_original_file': False,
+    'apply_markdown_fix': True,
+    'sort_by_filename': True,
+    'enable_reranking': ENABLE_RERANKING
+}
+
+# 从URL参数中获取配置
+params = st.query_params
+
+# 如果会话状态未初始化，则从URL参数加载配置
+if not st.session_state.config_initialized:
+    for key, default_value in default_config.items():
+        if key not in st.session_state:
+            # 尝试从URL参数获取值
+            if key in params:
+                param_value = params[key]
+                # 根据默认值类型转换参数值
+                if isinstance(default_value, bool):
+                    st.session_state[key] = param_value.lower() == 'true'
+                elif isinstance(default_value, int):
+                    st.session_state[key] = int(param_value)
+                elif isinstance(default_value, float):
+                    st.session_state[key] = float(param_value)
+                else:
+                    st.session_state[key] = param_value
+            else:
+                # 使用默认值
+                st.session_state[key] = default_value
+    
+    st.session_state.config_initialized = True
+
+# 更新URL参数的函数
+def update_url_params():
+    for key in default_config.keys():
+        if key in st.session_state:
+            st.query_params[key] = str(st.session_state[key])
+
+# 配置项变更回调函数
+def on_config_change(key):
+    def callback():
+        # 更新URL参数
+        update_url_params()
+    return callback
+
+# 使用会话状态中的值显示配置项，不再提供默认值参数
+top_k = st.sidebar.slider("返回结果数量", 1, 20, 
+                         key='top_k',
+                         on_change=on_config_change('top_k'))
+
+score_threshold = st.sidebar.slider("相似度阈值", 0.0, 1.0, 
+                                  step=0.01,
+                                  key='score_threshold',
+                                  on_change=on_config_change('score_threshold'))
+
+highlight_keywords = st.sidebar.checkbox("高亮关键词", 
+                                       key='highlight_keywords',
+                                       on_change=on_config_change('highlight_keywords'))
+
+show_full_path = st.sidebar.checkbox("显示完整文件路径", 
+                                   key='show_full_path',
+                                   on_change=on_config_change('show_full_path'))
 
 # 添加高级选项折叠区
 with st.sidebar.expander("🔧 高级选项"):
     # 初始化会话状态变量，用于跟踪上一次"优先使用原始文件内容"的状态
     if 'previous_use_original_file' not in st.session_state:
-        st.session_state.previous_use_original_file = False
+        st.session_state.previous_use_original_file = st.session_state.use_original_file
     
-    use_original_file = st.checkbox("优先使用原始文件内容", value=False, 
-                                  help="如果选中，将尝试读取原始文件内容而不仅仅使用向量数据库中的片段")
+    use_original_file = st.checkbox("优先使用原始文件内容", 
+                                  key='use_original_file',
+                                  help="如果选中，将尝试读取原始文件内容而不仅仅使用向量数据库中的片段",
+                                  on_change=on_config_change('use_original_file'))
     
     # 检查"优先使用原始文件内容"选项是否从关闭变为打开
     if use_original_file and not st.session_state.previous_use_original_file:
@@ -513,13 +583,21 @@ with st.sidebar.expander("🔧 高级选项"):
     # 更新上一次的状态
     st.session_state.previous_use_original_file = use_original_file
     
-    apply_markdown_fix = st.checkbox("修复截断的Markdown语法", value=True,
-                                   help="自动修复可能被截断的Markdown语法，如代码块、链接等")
-    sort_by_filename = st.checkbox("文件名匹配优先", value=True,
-                                 help="如果文件名包含搜索关键词，则优先显示")
+    apply_markdown_fix = st.checkbox("修复截断的Markdown语法", 
+                                   key='apply_markdown_fix',
+                                   help="自动修复可能被截断的Markdown语法，如代码块、链接等",
+                                   on_change=on_config_change('apply_markdown_fix'))
+    
+    sort_by_filename = st.checkbox("文件名匹配优先", 
+                                 key='sort_by_filename',
+                                 help="如果文件名包含搜索关键词，则优先显示",
+                                 on_change=on_config_change('sort_by_filename'))
     
     # 添加重排序开关
-    enable_reranking = st.checkbox("启用重排序", value=ENABLE_RERANKING, help="启用后将使用重排序模型对搜索结果进行精确排序，可能会增加搜索时间")
+    enable_reranking = st.checkbox("启用重排序", 
+                                 key='enable_reranking', 
+                                 help="启用后将使用重排序模型对搜索结果进行精确排序，可能会增加搜索时间",
+                                 on_change=on_config_change('enable_reranking'))
 
 query = st.text_input("请输入你的问题或关键词：", "")
 
@@ -695,7 +773,7 @@ if query:
             search_points = search_result.points
             
             # 准备重排序 (第二阶段：重排序)
-            if reranker is not None and enable_reranking:
+            if reranker is not None and st.session_state.enable_reranking:
                 with st.spinner("正在重排序结果..."):
                     # 确保搜索结果是可迭代的对象
                     if not hasattr(search_points, '__iter__'):
@@ -855,7 +933,7 @@ if query:
         #     st.session_state.show_full_content[file_id] = False
         
         # 如果有正在查看完整内容的文件，显示固定在顶部的按钮
-        if use_original_file and st.session_state.current_file_id and st.session_state.show_full_content.get(st.session_state.current_file_id, False):
+        if st.session_state.use_original_file and st.session_state.current_file_id and st.session_state.show_full_content.get(st.session_state.current_file_id, False):
             with st.sidebar:
                 st.markdown("### 文档控制")
                 
@@ -895,7 +973,7 @@ if query:
             # 添加文件路径和打开按钮（移到顶部）
             col1, col2 = st.columns([4, 1])
             with col1:
-                if show_full_path:
+                if st.session_state.show_full_path:
                     st.markdown(f"**📎 文件路径：** {raw_path}", unsafe_allow_html=True)
                 else:
                     st.markdown(f"**📎 文件名：** {abs_path.name}", unsafe_allow_html=True)
@@ -914,7 +992,7 @@ if query:
             st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)
             
             # 尝试读取原始文件以获取更完整的内容
-            if use_original_file:
+            if st.session_state.use_original_file:
                 try:
                     if os.path.exists(raw_path):
                         with open(raw_path, 'r', encoding='utf-8') as f:
@@ -935,7 +1013,7 @@ if query:
                 full_file_content = None
             
             # 检查并修复可能的Markdown截断问题
-            if apply_markdown_fix:
+            if st.session_state.apply_markdown_fix:
                 content = fix_truncated_markdown(content)
             
             # 确保内容是字符串类型
@@ -1014,7 +1092,7 @@ if query:
                         st.markdown(keyword_info["context_text"], unsafe_allow_html=True)
                     
                     # 只在"优先使用原始文件内容"模式下显示"查看完整内容"按钮
-                    if use_original_file:
+                    if st.session_state.use_original_file:
                         # 定义按钮点击回调函数
                         def on_view_full_click():
                             st.session_state.show_full_content[file_id] = True
@@ -1123,7 +1201,7 @@ if query:
                         st.markdown(content, unsafe_allow_html=True)
                     
                     # 只在"优先使用原始文件内容"模式下显示"查看完整内容"按钮
-                    if use_original_file:
+                    if st.session_state.use_original_file:
                         # 定义按钮点击回调函数
                         def on_view_full_click():
                             st.session_state.show_full_content[file_id] = True
@@ -1171,7 +1249,7 @@ if query:
                         st.markdown(content, unsafe_allow_html=True)
                     
                     # 如果需要高亮关键词，添加JavaScript
-                    if highlight_keywords and keywords and not MARKDOWN_IT_AVAILABLE:
+                    if st.session_state.highlight_keywords and keywords and not MARKDOWN_IT_AVAILABLE:
                         content_id = hashlib.md5(content.encode()).hexdigest()
                         
                         highlight_js = f"""
