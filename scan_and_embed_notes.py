@@ -168,7 +168,19 @@ try:
             sys.exit(1)
     else:
         # 正常模式下加载在线模型
-        model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+        # 确保模型完全下载完成
+        try:
+            # 添加一个简单的测试，确保模型已完全加载
+            model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+            # 测试模型是否可用，使用一个简单的文本进行编码测试
+            test_text = "测试模型是否完全加载"
+            test_vector = model.encode(test_text)
+            if len(test_vector) != VECTOR_DIM:
+                raise ValueError(f"模型测试失败：向量维度不匹配，期望 {VECTOR_DIM}，实际 {len(test_vector)}")
+        except Exception as e:
+            print(f"❌ 模型加载或测试失败: {e}")
+            print("请确保网络连接正常，或尝试使用离线模式")
+            sys.exit(1)
     
     print("✓ 模型加载完成")
     
@@ -710,103 +722,135 @@ index = load_index_file()
 deleted_count = remove_deleted_files(client, index)  # 删除已经不存在的文件的向量
 
 # 扫描所有文件
-all_files = list(ROOT_DIR.rglob("*"))
-for path in tqdm(all_files, desc="处理文件"):
-    if not path.is_file() or path.suffix.lower() not in EXTENSIONS:
-        continue
+all_files = [path for path in ROOT_DIR.rglob("*") if path.is_file() and path.suffix.lower() in EXTENSIONS]
+print(f"找到 {len(all_files)} 个 Markdown 文件")
 
-    if not FORCE_REINDEX and not is_file_modified(str(path), index) and not is_file_content_modified(path, index):
-        skipped_count += 1
-        continue
+# 设置批处理大小
+BATCH_SIZE = 32  # 每次处理的文件数量
+VECTOR_BATCH_SIZE = 128  # 每次上传到数据库的向量数量
 
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception as e:
-        print(f"⚠️ 读取文件 {path} 失败: {e}")
-        continue
-
-    # 提取文件名（不含扩展名）作为额外的文本内容
-    filename = path.stem
+# 分批处理文件
+for batch_start in range(0, len(all_files), BATCH_SIZE):
+    batch_end = min(batch_start + BATCH_SIZE, len(all_files))
+    batch_files = all_files[batch_start:batch_end]
     
-    # 处理文件名，将驼峰命名、下划线、连字符等分割为空格
-    # 例如: "Windows开启bbr" -> "Windows 开启 bbr"
-    # 例如: "windows_bbr_config" -> "windows bbr config"
-    processed_filename = re.sub(r'([a-z])([A-Z])', r'\1 \2', filename)  # 驼峰转空格
-    processed_filename = re.sub(r'[_\-.]', ' ', processed_filename)     # 下划线、连字符转空格
+    print(f"处理批次 {batch_start//BATCH_SIZE + 1}/{(len(all_files) + BATCH_SIZE - 1)//BATCH_SIZE}，文件 {batch_start+1}-{batch_end} / {len(all_files)}")
     
-    # 将文件名添加到文本内容的开头，增加权重
-    text_with_filename = f"# {processed_filename}\n\n{text}"
-    
-    # 从向量数据库中删除该文件的旧向量（如果存在）
-    try:
-        filter_condition = Filter(
-            must=[
-                FieldCondition(
-                    key="source",
-                    match=MatchValue(value=str(path))
-                )
-            ]
-        )
-        client.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=filter_condition
-        )
-    except Exception as e:
-        print(f"删除旧向量时出错: {e}")
-    
-    chunks = split_markdown_chunks(text_with_filename)
-    if not chunks:
-        continue
+    for path in tqdm(batch_files, desc="处理文件"):
+        if not FORCE_REINDEX and not is_file_modified(str(path), index) and not is_file_content_modified(path, index):
+            skipped_count += 1
+            continue
 
-    sentences = [f"{title}\n{content}" if title else content for title, content in chunks]
-    vectors = model.encode(sentences, show_progress_bar=False)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"⚠️ 读取文件 {path} 失败: {e}")
+            continue
 
-    for i, vec in enumerate(vectors):
-        # 使用 uuid5 基于 SHA1 哈希生成确定性 UUID
+        # 提取文件名（不含扩展名）作为额外的文本内容
+        filename = path.stem
+        
+        # 处理文件名，将驼峰命名、下划线、连字符等分割为空格
+        processed_filename = re.sub(r'([a-z])([A-Z])', r'\1 \2', filename)  # 驼峰转空格
+        processed_filename = re.sub(r'[_\-.]', ' ', processed_filename)     # 下划线、连字符转空格
+        
+        # 将文件名添加到文本内容的开头，增加权重
+        text_with_filename = f"# {processed_filename}\n\n{text}"
+        
+        # 从向量数据库中删除该文件的旧向量（如果存在）
+        try:
+            filter_condition = Filter(
+                must=[
+                    FieldCondition(
+                        key="source",
+                        match=MatchValue(value=str(path))
+                    )
+                ]
+            )
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=filter_condition
+            )
+        except Exception as e:
+            print(f"删除旧向量时出错: {e}")
+        
+        chunks = split_markdown_chunks(text_with_filename)
+        if not chunks:
+            continue
+
+        sentences = [f"{title}\n{content}" if title else content for title, content in chunks]
+        
+        # 分批编码，避免一次性处理太多文本导致内存溢出
+        ENCODE_BATCH_SIZE = 16  # 每批编码的文本数量
+        vectors = []
+        
+        for i in range(0, len(sentences), ENCODE_BATCH_SIZE):
+            batch_sentences = sentences[i:i+ENCODE_BATCH_SIZE]
+            batch_vectors = model.encode(batch_sentences, show_progress_bar=False)
+            vectors.extend(batch_vectors)
+            
+            # 手动清理内存
+            if i % (ENCODE_BATCH_SIZE * 4) == 0 and i > 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
         namespace = uuid.NAMESPACE_DNS
-        uid = uuid.uuid5(namespace, f"{path}-{i}")
+        for i, vec in enumerate(vectors):
+            uid = uuid.uuid5(namespace, f"{path}-{i}")
+            all_points.append(PointStruct(
+                id=str(uid),
+                vector=vec.tolist(),
+                payload={
+                    "text": sentences[i],
+                    "source": str(path),
+                    "file_path": str(path),
+                    "filename": path.name,
+                    "chunk_id": f"{path.name}-{i}",
+                    "created_at": datetime.now().isoformat()
+                }
+            ))
+        
+        # 额外添加一个仅包含文件名的向量点，提高文件名搜索的准确性
+        filename_vector = model.encode(processed_filename)
+        filename_uid = uuid.uuid5(namespace, f"{path}-filename")
         all_points.append(PointStruct(
-            id=str(uid),  # 将 UUID 转换为字符串
-            vector=vec.tolist(),
+            id=str(filename_uid),
+            vector=filename_vector.tolist(),
             payload={
-                "text": sentences[i],
+                "text": f"# {processed_filename}",
                 "source": str(path),
-                "file_path": str(path),  # 添加file_path字段，与search_notes.py一致
-                "filename": path.name,  # 添加文件名到payload
-                "chunk_id": f"{path.name}-{i}",  # 添加chunk_id
-                "created_at": datetime.now().isoformat()  # 添加创建时间
+                "file_path": str(path),
+                "filename": path.name,
+                "chunk_id": f"{path.name}-filename",
+                "created_at": datetime.now().isoformat(),
+                "is_filename_only": True
             }
         ))
 
-    # 额外添加一个仅包含文件名的向量点，提高文件名搜索的准确性
-    filename_vector = model.encode(processed_filename)
-    filename_uid = uuid.uuid5(namespace, f"{path}-filename")
-    all_points.append(PointStruct(
-        id=str(filename_uid),
-        vector=filename_vector.tolist(),
-        payload={
-            "text": f"# {processed_filename}",
-            "source": str(path),
-            "file_path": str(path),  # 添加file_path字段，与search_notes.py一致
-            "filename": path.name,
-            "chunk_id": f"{path.name}-filename",  # 添加chunk_id
-            "created_at": datetime.now().isoformat(),  # 添加创建时间
-            "is_filename_only": True  # 标记这是一个仅包含文件名的向量点
-        }
-    ))
-
-    update_index_file_with_md5(path, index)
-    modified_count += 1
-    file_count += 1
+        update_index_file_with_md5(path, index)
+        modified_count += 1
+        file_count += 1
+        
+        # 当累积的向量点达到一定数量时，上传到数据库并清空
+        if len(all_points) >= VECTOR_BATCH_SIZE:
+            client.upsert(collection_name=COLLECTION_NAME, points=all_points)
+            all_points = []
+            # 定期保存索引文件，避免中断导致索引丢失
+            save_index_file(index)
+            
+            # 清理GPU内存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
-    if len(all_points) >= 128:
+    # 每批次处理完成后，强制清理内存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # 确保当前批次的点已上传
+    if all_points:
         client.upsert(collection_name=COLLECTION_NAME, points=all_points)
         all_points = []
-        # 定期保存索引文件，避免中断导致索引丢失
         save_index_file(index)
-
-if all_points:
-    client.upsert(collection_name=COLLECTION_NAME, points=all_points)
 
 # 最后保存索引文件
 save_index_file(index)

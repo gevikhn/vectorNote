@@ -223,62 +223,161 @@ def search_notes(query: str, model=None, client=None, reranker=None):
         with_payload=True,
     )
     
+    # 调试信息
+    console.print(f"[bold cyan]调试: 搜索结果类型: {type(search_result)}[/bold cyan]")
+    
     # 如果没有找到结果，直接返回空列表
-    if not search_result:
+    if not search_result or not hasattr(search_result, 'points') or not search_result.points:
+        console.print("[bold yellow]未找到相关结果[/bold yellow]")
         return []
+    
+    # 获取实际的点列表
+    search_points = search_result.points
+    console.print(f"[bold cyan]调试: 找到 {len(search_points)} 个结果[/bold cyan]")
     
     # 准备重排序 (第二阶段：重排序)
     if reranker is not None:
-        # 提取检索到的文档和查询，准备重排序
-        passages = [hit.payload.get("text", "") for hit in search_result]
-        
-        # 创建查询-文档对，用于重排序
-        query_passage_pairs = [[query, passage] for passage in passages]
-        
-        # 使用重排序模型计算相关性分数
-        rerank_scores = reranker.predict(query_passage_pairs)
-        
-        # 将重排序分数与检索结果合并
-        for i, hit in enumerate(search_result):
-            hit.score = float(rerank_scores[i])  # 更新为重排序分数
-        
-        # 按重排序分数重新排序
-        search_result = sorted(search_result, key=lambda x: x.score, reverse=True)
-        
-        # 只保留前RERANK_TOP_K个结果
-        search_result = search_result[:RERANK_TOP_K]
+        try:
+            # 提取检索到的文档和查询，准备重排序
+            passages = []
+            for point in search_points:
+                try:
+                    # 从 ScoredPoint 对象中提取 payload 和文本
+                    payload = point.payload
+                    if isinstance(payload, dict):
+                        text = payload.get("text", "")
+                    elif isinstance(payload, list):
+                        # 如果payload是列表，尝试获取第一个元素并确保是字符串
+                        text = str(payload[0]) if payload else ""
+                    else:
+                        # 其他类型，转换为字符串
+                        text = str(payload)
+                    
+                    # 确保text是字符串类型
+                    if not isinstance(text, str):
+                        text = str(text)
+                    
+                    # 限制文本长度，防止模型处理过长文本
+                    MAX_TEXT_LENGTH = 512  # 根据模型的最大输入长度调整
+                    if len(text) > MAX_TEXT_LENGTH:
+                        text = text[:MAX_TEXT_LENGTH]
+                    
+                    passages.append(text)
+                except Exception as e:
+                    console.print(f"[bold yellow]警告: 提取文本时出错: {str(e)}，类型: {type(point)}[/bold yellow]")
+                    passages.append("")  # 添加空字符串作为占位符
+            
+            # 创建查询-文档对，用于重排序
+            query_passage_pairs = []
+            for passage in passages:
+                # 确保查询和文本都是字符串类型
+                query_str = str(query)
+                passage_str = str(passage)
+                query_passage_pairs.append([query_str, passage_str])
+            
+            try:
+                # 尝试使用GPU进行重排序
+                rerank_scores = reranker.predict(query_passage_pairs)
+            except Exception as e:
+                console.print(f"[bold yellow]GPU重排序失败，尝试使用CPU: {str(e)}[/bold yellow]")
+                # 尝试将模型移至CPU
+                try:
+                    import torch
+                    device = torch.device("cpu")
+                    reranker.to(device)
+                    rerank_scores = reranker.predict(query_passage_pairs)
+                except Exception as e2:
+                    console.print(f"[bold red]重排序失败，跳过重排序步骤: {str(e2)}[/bold red]")
+                    # 如果重排序失败，直接使用原始搜索结果
+                    return format_search_results(search_points)
+            
+            # 将重排序分数与检索结果合并
+            for i, point in enumerate(search_points):
+                try:
+                    # 更新分数
+                    point.score = float(rerank_scores[i])
+                except Exception as e:
+                    console.print(f"[bold yellow]警告: 更新分数时出错: {str(e)}，类型: {type(point)}[/bold yellow]")
+            
+            # 按重排序分数重新排序
+            search_points = sorted(search_points, key=lambda x: x.score, reverse=True)
+            
+            # 只保留前RERANK_TOP_K个结果
+            search_points = search_points[:RERANK_TOP_K]
+        except Exception as e:
+            console.print(f"[bold red]重排序过程中出错，使用原始搜索结果: {str(e)}[/bold red]")
+            # 如果重排序过程中出错，直接使用原始搜索结果
+            return format_search_results(search_points)
     
+    return format_search_results(search_points)
+
+def format_search_results(search_points):
+    """格式化搜索结果，处理不同类型的结果"""
     # 过滤掉低于阈值的结果
-    search_result = [hit for hit in search_result if hit.score > SCORE_THRESHOLD]
+    filtered_results = []
+    for point in search_points:
+        try:
+            # 添加调试信息，显示分数
+            console.print(f"[bold cyan]调试: 结果分数: {point.score}[/bold cyan]")
+            
+            # 降低阈值，临时设置为0.01
+            if point.score > 0.01:  # 原来是 SCORE_THRESHOLD (0.45)
+                filtered_results.append(point)
+        except Exception as e:
+            console.print(f"[bold yellow]警告: 过滤结果时出错: {str(e)}，类型: {type(point)}[/bold yellow]")
+    
+    search_points = filtered_results
+    console.print(f"[bold cyan]调试: 过滤后剩余 {len(search_points)} 个结果[/bold cyan]")
     
     # 格式化结果
     formatted_results = []
-    for hit in search_result:
-        payload = hit.payload
-        
-        # 提取文件路径和文本内容
-        file_path = payload.get("file_path", "未知路径")
-        text = payload.get("text", "")
-        
-        # 计算相对路径（如果是绝对路径）
-        if os.path.isabs(file_path) and str(ROOT_DIR) in file_path:
-            rel_path = os.path.relpath(file_path, ROOT_DIR)
-        else:
-            rel_path = file_path
+    for point in search_points:
+        try:
+            # 获取payload和分数
+            score = point.score
+            payload = point.payload
             
-        # 提取其他元数据
-        chunk_id = payload.get("chunk_id", "")
-        created_at = payload.get("created_at", "")
-        
-        # 添加到结果列表
-        formatted_results.append({
-            "score": hit.score,
-            "file_path": file_path,
-            "rel_path": rel_path,
-            "text": text,
-            "chunk_id": chunk_id,
-            "created_at": created_at
-        })
+            # 处理不同类型的payload
+            if isinstance(payload, dict):
+                # 提取文件路径和文本内容
+                file_path = payload.get("file_path", payload.get("source", "未知路径"))
+                text = payload.get("text", "")
+                
+                # 计算相对路径（如果是绝对路径）
+                if os.path.isabs(file_path) and str(ROOT_DIR) in file_path:
+                    rel_path = os.path.relpath(file_path, ROOT_DIR)
+                else:
+                    rel_path = file_path
+                    
+                # 提取其他元数据
+                chunk_id = payload.get("chunk_id", "")
+                created_at = payload.get("created_at", "")
+            elif isinstance(payload, list):
+                # 如果payload是列表，尝试使用第一个元素作为文本
+                text = str(payload[0]) if payload else ""
+                file_path = "未知路径"
+                rel_path = "未知路径"
+                chunk_id = ""
+                created_at = ""
+            else:
+                # 其他类型，转换为字符串
+                text = str(payload)
+                file_path = "未知路径"
+                rel_path = "未知路径"
+                chunk_id = ""
+                created_at = ""
+            
+            # 添加到结果列表
+            formatted_results.append({
+                "score": score,
+                "file_path": file_path,
+                "rel_path": rel_path,
+                "text": text,
+                "chunk_id": chunk_id,
+                "created_at": created_at
+            })
+        except Exception as e:
+            console.print(f"[bold yellow]警告: 格式化结果时出错: {str(e)}，类型: {type(point)}[/bold yellow]")
     
     return formatted_results
 

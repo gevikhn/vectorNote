@@ -1,9 +1,68 @@
 import streamlit as st
 import subprocess
 import json
+import sys
+import logging
+import uuid
+
+# 设置日志记录
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 自定义异常处理函数
+def custom_excepthook(exc_type, exc_value, exc_traceback):
+    # 忽略特定的 PyTorch 错误
+    if "Tried to instantiate class '__path__._path'" in str(exc_value):
+        logger.warning("忽略 PyTorch 路径错误: %s", str(exc_value))
+        return
+    # 对于其他错误，使用默认处理
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+# 设置全局异常处理
+sys.excepthook = custom_excepthook
+
+# 尝试导入 torch 并设置异常处理
+try:
+    import torch
+    # 为 torch 模块添加特殊处理
+    original_getattr = torch.__class__.__getattr__
+    
+    def safe_getattr(self, name):
+        try:
+            return original_getattr(self, name)
+        except RuntimeError as e:
+            if "__path__._path" in str(e):
+                logger.warning("安全处理 torch 路径访问: %s", str(e))
+                return []
+            raise
+    
+    # 只在开发环境中应用这个修复
+    if "streamlit" in sys.modules:
+        torch.__class__.__getattr__ = safe_getattr
+except ImportError:
+    logger.info("torch 未安装，跳过相关修复")
+except Exception as e:
+    logger.warning("应用 torch 修复时出错: %s", str(e))
 
 # 必须是第一个 Streamlit 命令
 st.set_page_config(page_title="Obsidian 搜索", layout="wide")
+
+# 注释掉这个配置，因为它可能影响按钮功能
+# st.set_option('client.showErrorDetails', False)
+
+# 初始化会话状态变量
+if 'show_full_content' not in st.session_state:
+    st.session_state.show_full_content = {}
+
+if 'current_file_id' not in st.session_state:
+    st.session_state.current_file_id = None
+
+if 'scroll_to_file' not in st.session_state:
+    st.session_state.scroll_to_file = None
+
+# 添加一个新的会话状态变量，用于触发页面重新渲染
+if 'needs_rerun' not in st.session_state:
+    st.session_state.needs_rerun = False
 
 # 导入配置文件
 try:
@@ -31,6 +90,8 @@ import torch
 import os
 import streamlit.components.v1 as components
 import hashlib
+import random
+import time
 
 # 添加 markdown-it-py 和 pygments 支持
 try:
@@ -258,41 +319,56 @@ def check_cuda_availability():
 DEVICE = check_cuda_availability()
 
 # 初始化
-@st.cache_resource
+@st.cache_resource(show_spinner=False, ttl=3600)
 def load_model_and_client():
     """加载模型和数据库客户端"""
+    # 创建一个侧边栏容器，用于显示所有加载信息
+    sidebar_container = st.sidebar.container()
+    
     try:
         # 检查本地模型目录是否存在（如果在离线模式下）
         if OFFLINE_MODE:
-            st.info(f"正在离线模式下加载模型...")
+            with sidebar_container:
+                st.info(f"正在离线模式下加载模型...")
             # 加载嵌入模型
             if os.path.exists(LOCAL_MODEL_PATH):
-                st.success(f"找到本地嵌入模型: {LOCAL_MODEL_PATH}")
+                with sidebar_container:
+                    st.success(f"找到本地嵌入模型: {LOCAL_MODEL_PATH}")
                 # 使用本地模型路径
                 model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
             else:
-                st.error(f"未找到本地嵌入模型: {LOCAL_MODEL_PATH}")
-                st.error("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
+                with sidebar_container:
+                    st.error(f"未找到本地嵌入模型: {LOCAL_MODEL_PATH}")
+                    st.error("请先在联网状态下运行一次程序下载模型，或者手动下载模型到指定目录")
                 return None, None, None
                 
             # 加载重排序模型
             if os.path.exists(LOCAL_RERANKER_PATH):
-                st.success(f"找到本地重排序模型: {LOCAL_RERANKER_PATH}")
+                with sidebar_container:
+                    st.success(f"找到本地重排序模型: {LOCAL_RERANKER_PATH}")
                 # 使用本地重排序模型路径
                 reranker = CrossEncoder(LOCAL_RERANKER_PATH, device=DEVICE)
             else:
-                st.warning(f"未找到本地重排序模型: {LOCAL_RERANKER_PATH}")
-                st.warning("将仅使用向量检索，不进行重排序")
+                with sidebar_container:
+                    st.warning(f"未找到本地重排序模型: {LOCAL_RERANKER_PATH}")
+                    st.warning("将仅使用向量检索，不进行重排序")
                 reranker = None
         else:
             # 正常模式下加载在线模型
-            model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+            with sidebar_container:
+                with st.spinner("正在加载嵌入模型..."):
+                    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+                    st.success(f"✓ {MODEL_NAME} 嵌入模型加载完成")
+            
             try:
-                reranker = CrossEncoder(RERANKER_MODEL_NAME, device=DEVICE)
-                st.success("✓ 重排序模型加载完成")
+                with sidebar_container:
+                    with st.spinner("正在加载重排序模型..."):
+                        reranker = CrossEncoder(RERANKER_MODEL_NAME, device=DEVICE)
+                        st.success(f"✓ {RERANKER_MODEL_NAME} 重排序模型加载完成")
             except Exception as e:
-                st.warning(f"加载重排序模型失败: {e}")
-                st.warning("将仅使用向量检索，不进行重排序")
+                with sidebar_container:
+                    st.warning(f"加载重排序模型失败: {e}")
+                    st.warning("将仅使用向量检索，不进行重排序")
                 reranker = None
         
         # 尝试连接本地数据库
@@ -300,42 +376,66 @@ def load_model_and_client():
             client = QdrantClient(path="./qdrant_data")
             # 检查集合是否存在
             if not client.collection_exists(COLLECTION_NAME):
-                st.warning(f"⚠️ 集合 {COLLECTION_NAME} 不存在，请先运行 scan_and_embed_notes.py 创建索引")
+                with sidebar_container:
+                    st.warning(f"⚠️ 集合 {COLLECTION_NAME} 不存在，请先运行 scan_and_embed_notes.py 创建索引")
                 # 创建临时内存数据库
                 client = QdrantClient(":memory:")
-                st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 创建索引。")
+                with sidebar_container:
+                    st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 创建索引。")
         else:
-            st.warning("⚠️ 未找到向量数据库文件，使用临时内存数据库")
+            with sidebar_container:
+                st.warning("⚠️ 未找到向量数据库文件，使用临时内存数据库")
             client = QdrantClient(":memory:")
-            st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 创建索引。")
+            with sidebar_container:
+                st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 创建索引。")
         
         return model, client, reranker
     except Exception as e:
-        st.error(f"加载模型或数据库时出错: {str(e)}")
-        st.info("尝试重新初始化数据库...")
+        with sidebar_container:
+            st.error(f"加载模型或数据库时出错: {str(e)}")
+            st.info("尝试重新初始化数据库...")
         try:
             # 尝试重新创建数据库连接
             client = QdrantClient(":memory:")  # 临时使用内存数据库
-            st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 重建索引。")
+            with sidebar_container:
+                st.warning("⚠️ 使用临时内存数据库。请先运行 scan_and_embed_notes.py 重建索引。")
             
             # 在离线模式下再次尝试加载本地模型
             if OFFLINE_MODE and os.path.exists(LOCAL_MODEL_PATH):
-                model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
-                
+                with sidebar_container:
+                    with st.spinner("正在加载本地嵌入模型..."):
+                        model = SentenceTransformer(LOCAL_MODEL_PATH, device=DEVICE)
+                        st.success(f"✓ 本地嵌入模型加载完成")
+            
                 # 尝试加载重排序模型
                 if os.path.exists(LOCAL_RERANKER_PATH):
-                    reranker = CrossEncoder(LOCAL_RERANKER_PATH, device=DEVICE)
+                    with sidebar_container:
+                        with st.spinner("正在加载本地重排序模型..."):
+                            reranker = CrossEncoder(LOCAL_RERANKER_PATH, device=DEVICE)
+                            st.success(f"✓ 本地重排序模型加载完成")
                 else:
+                    with sidebar_container:
+                        st.warning("⚠️ 未找到本地重排序模型，将仅使用向量检索")
                     reranker = None
             else:
-                model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+                with sidebar_container:
+                    with st.spinner("正在加载嵌入模型..."):
+                        model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+                        st.success(f"✓ {MODEL_NAME} 嵌入模型加载完成")
+            
                 try:
-                    reranker = CrossEncoder(RERANKER_MODEL_NAME, device=DEVICE)
+                    with sidebar_container:
+                        with st.spinner("正在加载重排序模型..."):
+                            reranker = CrossEncoder(RERANKER_MODEL_NAME, device=DEVICE)
+                            st.success(f"✓ {RERANKER_MODEL_NAME} 重排序模型加载完成")
                 except Exception:
+                    with sidebar_container:
+                        st.warning("⚠️ 重排序模型加载失败，将仅使用向量检索")
                     reranker = None
             return model, client, reranker
         except Exception as e2:
-            st.error(f"无法创建临时数据库: {str(e2)}")
+            with sidebar_container:
+                st.error(f"无法创建临时数据库: {str(e2)}")
             # 返回None，后续代码需要处理None的情况
             return None, None, None
 
@@ -344,7 +444,8 @@ model, client, reranker = load_model_and_client()
 
 # 检查模型和客户端是否成功加载
 if model is None or client is None:
-    st.error("无法加载模型或数据库，请检查错误信息并重试。")
+    with st.sidebar:
+        st.error("无法加载模型或数据库，请检查错误信息并重试。")
     st.stop()
 
 # UI
@@ -383,14 +484,34 @@ st.markdown("""
 st.sidebar.header("⚙️ 搜索配置")
 top_k = st.sidebar.slider("返回结果数量", 1, 20, 5)
 score_threshold = st.sidebar.slider("相似度阈值", 0.0, 1.0, 0.45, 0.01)
-max_display_lines = st.sidebar.slider("每个结果最大显示行数", 10, 100, 50)
 highlight_keywords = st.sidebar.checkbox("高亮关键词", value=True)
 show_full_path = st.sidebar.checkbox("显示完整文件路径", value=True)
 
 # 添加高级选项折叠区
 with st.sidebar.expander("🔧 高级选项"):
-    use_original_file = st.checkbox("优先使用原始文件内容", value=True, 
+    # 初始化会话状态变量，用于跟踪上一次"优先使用原始文件内容"的状态
+    if 'previous_use_original_file' not in st.session_state:
+        st.session_state.previous_use_original_file = False
+    
+    use_original_file = st.checkbox("优先使用原始文件内容", value=False, 
                                   help="如果选中，将尝试读取原始文件内容而不仅仅使用向量数据库中的片段")
+    
+    # 检查"优先使用原始文件内容"选项是否从关闭变为打开
+    if use_original_file and not st.session_state.previous_use_original_file:
+        # 如果是，重置所有文件的show_full_content状态
+        if 'show_full_content' in st.session_state:
+            for file_id in st.session_state.show_full_content:
+                st.session_state.show_full_content[file_id] = False
+    # 检查"优先使用原始文件内容"选项是否从打开变为关闭
+    elif not use_original_file and st.session_state.previous_use_original_file:
+        # 如果是，设置所有文件的show_full_content状态为True，显示完整内容
+        if 'show_full_content' in st.session_state:
+            for file_id in st.session_state.show_full_content:
+                st.session_state.show_full_content[file_id] = True
+    
+    # 更新上一次的状态
+    st.session_state.previous_use_original_file = use_original_file
+    
     apply_markdown_fix = st.checkbox("修复截断的Markdown语法", value=True,
                                    help="自动修复可能被截断的Markdown语法，如代码块、链接等")
     sort_by_filename = st.checkbox("文件名匹配优先", value=True,
@@ -548,7 +669,6 @@ if query:
     # 应用查询增强
     enhanced_query = enhance_query(query)
     
-    # 搜索
     with st.spinner("正在搜索..."):
         try:
             # 将查询文本转换为向量
@@ -563,58 +683,145 @@ if query:
             )
             
             # 如果没有找到结果，提示用户
-            if not search_result:
+            if not search_result or not hasattr(search_result, 'points') or not search_result.points:
                 st.warning("没有找到相关内容。")
                 st.stop()
+            
+            # 获取实际的点列表
+            search_points = search_result.points
             
             # 准备重排序 (第二阶段：重排序)
             if reranker is not None:
                 with st.spinner("正在重排序结果..."):
-                    # 提取检索到的文档和查询，准备重排序
-                    passages = [hit.payload.get("text", "") for hit in search_result]
+                    # 确保搜索结果是可迭代的对象
+                    if not hasattr(search_points, '__iter__'):
+                        st.error(f"搜索结果类型错误: {type(search_points)}")
+                        st.stop()
+                    
+                    # 安全地提取文本内容，处理不同类型的结果
+                    passages = []
+                    file_matches = []  # 初始化文件名匹配列表
+                    for point in search_points:
+                        try:
+                            # 从 ScoredPoint 对象中提取 payload 和文本
+                            payload = point.payload
+                            
+                            # 提取文本内容用于重排序
+                            if isinstance(payload, dict):
+                                text = payload.get("text", "")
+                            elif isinstance(payload, list):
+                                # 如果payload是列表，尝试获取第一个元素并确保是字符串
+                                text = str(payload[0]) if payload else ""
+                            else:
+                                # 其他类型，转换为字符串
+                                text = str(payload)
+                            
+                            # 确保text是字符串类型
+                            if not isinstance(text, str):
+                                text = str(text)
+                            
+                            # 限制文本长度，防止模型处理过长文本
+                            MAX_TEXT_LENGTH = 512  # 根据模型的最大输入长度调整
+                            if len(text) > MAX_TEXT_LENGTH:
+                                text = text[:MAX_TEXT_LENGTH]
+                            
+                            passages.append(text)
+                            
+                            # 检查是否是文件名向量点
+                            is_filename_only = payload.get("is_filename_only", False)
+                            
+                            # 获取文件名
+                            filename = payload.get("filename", "")
+                            if not filename:
+                                source_path = Path(payload.get("source", payload.get("file_path", "")))
+                                filename = source_path.name
+                                
+                            filename_lower = filename.lower()
+                            
+                            # 文件名向量点优先级更高
+                            if is_filename_only and all(term in filename_lower for term in query.lower().split()):
+                                file_matches.insert(0, point)  # 插入到最前面
+                            # 普通向量点但文件名匹配
+                            elif all(term in filename_lower for term in query.lower().split()):
+                                file_matches.append(point)
+                        except Exception as e:
+                            with st.sidebar:
+                                st.warning(f"提取文本时出错: {str(e)}")
+                            passages.append("")  # 添加空字符串作为占位符
                     
                     # 创建查询-文档对，用于重排序
-                    query_passage_pairs = [[query, passage] for passage in passages]
+                    query_passage_pairs = []
+                    for passage in passages:
+                        # 确保查询和文本都是字符串类型
+                        query_str = str(query)
+                        passage_str = str(passage)
+                        query_passage_pairs.append([query_str, passage_str])
                     
-                    # 使用重排序模型计算相关性分数
-                    rerank_scores = reranker.predict(query_passage_pairs)
+                    try:
+                        # 检查是否有足够的文本进行重排序
+                        if not query_passage_pairs:
+                            with st.sidebar:
+                                st.warning("没有足够的文本进行重排序，将使用原始搜索结果")
+                        else:
+                            # 使用重排序模型计算相关性分数
+                            rerank_scores = reranker.predict(query_passage_pairs)
+                            
+                            # 将重排序分数与检索结果合并
+                            for i, point in enumerate(search_points):
+                                if i < len(rerank_scores):  # 确保索引在有效范围内
+                                    try:
+                                        # 更新分数
+                                        point.score = float(rerank_scores[i])
+                                    except Exception as e:
+                                        with st.sidebar:
+                                            st.warning(f"更新分数时出错: {str(e)}")
                     
-                    # 将重排序分数与检索结果合并
-                    for i, hit in enumerate(search_result):
-                        hit.score = float(rerank_scores[i])  # 更新为重排序分数
-                    
-                    # 按重排序分数重新排序
-                    search_result = sorted(search_result, key=lambda x: x.score, reverse=True)
-                    
-                    # 只保留前RERANK_TOP_K个结果
-                    search_result = search_result[:RERANK_TOP_K]
+                    except Exception as e:
+                        with st.sidebar:
+                            st.warning(f"重排序过程中出错: {str(e)}")
+                        # 如果重排序失败，继续使用原始搜索结果
             
             # 过滤掉低于阈值的结果
-            results = [hit for hit in search_result if hit.score > SCORE_THRESHOLD]
+            results = []
+            for point in search_points:
+                try:
+                    # 降低阈值，临时设置为0.01
+                    if point.score > 0.01:  # 原来是 SCORE_THRESHOLD (0.45)
+                        results.append(point)
+                except Exception as e:
+                    with st.sidebar:
+                        st.warning(f"过滤结果时出错: {str(e)}")
             
             # 文件名精确匹配搜索（优先显示）
             file_matches = []
             query_terms = query.lower().split()
             
             # 根据文件路径和文件名进行匹配
-            for result in results:
-                # 检查是否是文件名向量点
-                is_filename_only = result.payload.get("is_filename_only", False)
-                
-                # 获取文件名
-                filename = result.payload.get("filename", "")
-                if not filename:
-                    source_path = Path(result.payload["source"])
-                    filename = source_path.name
+            for point in results:
+                try:
+                    # 获取payload
+                    payload = point.payload
                     
-                filename_lower = filename.lower()
-                
-                # 文件名向量点优先级更高
-                if is_filename_only and all(term in filename_lower for term in query_terms):
-                    file_matches.insert(0, result)  # 插入到最前面
-                # 普通向量点但文件名匹配
-                elif all(term in filename_lower for term in query_terms):
-                    file_matches.append(result)
+                    # 检查是否是文件名向量点
+                    is_filename_only = payload.get("is_filename_only", False)
+                    
+                    # 获取文件名
+                    filename = payload.get("filename", "")
+                    if not filename:
+                        source_path = Path(payload.get("source", payload.get("file_path", "")))
+                        filename = source_path.name
+                        
+                    filename_lower = filename.lower()
+                    
+                    # 文件名向量点优先级更高
+                    if is_filename_only and all(term in filename_lower for term in query_terms):
+                        file_matches.insert(0, point)  # 插入到最前面
+                    # 普通向量点但文件名匹配
+                    elif all(term in filename_lower for term in query_terms):
+                        file_matches.append(point)
+                except Exception as e:
+                    with st.sidebar:
+                        st.warning(f"处理文件名匹配时出错: {str(e)}")
             
             # 合并结果
             combined_results = file_matches + [r for r in results if r not in file_matches]
@@ -622,78 +829,55 @@ if query:
             # 使用重排序后的结果
             results = combined_results
         except Exception as e:
-            st.error(f"搜索过程中出错: {str(e)}")
+            with st.sidebar:
+                st.error(f"搜索过程中出错: {str(e)}")
             st.stop()
-        
+    
     if results:
         st.subheader("📄 匹配结果：")
 
         keywords = list(set(re.findall(r'\w+', query.lower())))
 
-        # 初始化会话状态变量，用于跟踪显示完整内容的状态
-        if 'show_full_content' not in st.session_state:
-            st.session_state.show_full_content = {}
-        
-        # 初始化会话状态变量，用于跟踪当前查看的文件ID
-        if 'current_file_id' not in st.session_state:
-            st.session_state.current_file_id = None
-        
-        # 初始化会话状态变量，用于跟踪滚动位置
-        if 'scroll_to_file' not in st.session_state:
-            st.session_state.scroll_to_file = None
+        # 为每个文件生成唯一ID
+        # 移除这里的全局文件ID生成，我们将为每个文件单独生成ID
+        # file_id = str(uuid.uuid4())
+        # if file_id not in st.session_state.show_full_content:
+        #     st.session_state.show_full_content[file_id] = False
         
         # 如果有正在查看完整内容的文件，显示固定在顶部的按钮
-        if st.session_state.current_file_id and st.session_state.show_full_content.get(st.session_state.current_file_id, False):
-            # 使用Streamlit组件创建固定样式的按钮容器
-            st.markdown("""
-            <style>
-            .fixed-top-container {
-                position: fixed;
-                top: 60px;
-                right: 20px;
-                z-index: 9999;
-                background-color: white;
-                padding: 5px;
-                border-radius: 5px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-            }
-            </style>
-            """, unsafe_allow_html=True)
-            
-            # 创建一个隐藏的按钮，用于处理收起操作
-            col1, col2, col3 = st.columns([4, 2, 4])
-            with col2:
-                if st.button("📎 收起完整内容", key="fixed_top_button", type="primary"):
+        if use_original_file and st.session_state.current_file_id and st.session_state.show_full_content.get(st.session_state.current_file_id, False):
+            with st.sidebar:
+                st.markdown("### 文档控制")
+                
+                # 定义收起按钮的回调函数
+                def on_collapse_click():
                     file_id = st.session_state.current_file_id
                     st.session_state.show_full_content[file_id] = False
                     st.session_state.scroll_to_file = file_id
-                    st.rerun()
-            
-            # 使用JavaScript将按钮移动到固定位置
-            st.markdown("""
-            <script>
-                // 等待DOM加载完成
-                document.addEventListener('DOMContentLoaded', function() {
-                    // 找到按钮元素
-                    const buttonElement = document.querySelector('[data-testid="baseButton-primary"]');
-                    if (buttonElement) {
-                        // 创建固定容器
-                        const container = document.createElement('div');
-                        container.className = 'fixed-top-container';
-                        
-                        // 将按钮移动到容器中
-                        container.appendChild(buttonElement);
-                        
-                        // 将容器添加到body
-                        document.body.appendChild(container);
-                    }
-                });
-            </script>
-            """, unsafe_allow_html=True)
+                    # 设置需要重新渲染的标志
+                    st.session_state.needs_rerun = True
+                
+                # 使用带回调的按钮
+                st.button("📎 收起完整内容", key=f"collapse_button_{int(time.time())}_{random.randint(10000, 99999)}", 
+                         on_click=on_collapse_click, type="primary")
         
-        for hit in results:
-            raw_path = hit.payload["source"]
-            content = hit.payload["text"]
+        for i, hit in enumerate(results):
+            try:
+                # 检查是否为元组类型（可能是旧版本的结果格式）
+                if isinstance(hit, tuple):
+                    # 如果是元组，假设第一个元素是分数，第二个元素是payload
+                    score, payload = hit
+                    raw_path = payload.get("source", payload.get("file_path", ""))
+                    content = payload.get("text", "")
+                else:
+                    # 正常处理对象类型
+                    raw_path = hit.payload["source"]
+                    content = hit.payload["text"]
+            except Exception as e:
+                st.error(f"处理搜索结果时出错: {str(e)}")
+                st.error(f"结果类型: {type(hit)}")
+                st.error(f"结果内容: {str(hit)[:500]}")
+                continue
             
             # 文档路径信息
             abs_path = Path(raw_path).resolve()
@@ -706,7 +890,9 @@ if query:
                 else:
                     st.markdown(f"**📎 文件名：** {abs_path.name}", unsafe_allow_html=True)
             with col2:
-                if st.button("🔗 打开文件", key=f"link_{raw_path}"):
+                # 使用索引和文件路径组合作为唯一key
+                button_key = f"link_{i}_{abs_path.name.replace('.', '_')}"
+                if st.button("🔗 打开文件", key=button_key):
                     # 使用系统默认方式打开文件
                     success, error = open_file_with_app(str(abs_path))
                     if not success:
@@ -722,63 +908,16 @@ if query:
                         with open(raw_path, 'r', encoding='utf-8') as f:
                             full_content = f.read()
                         
-                        # 提取文件的主要内容
-                        lines = full_content.split('\n')
-                        
-                        # 查找包含关键字的行
-                        keyword_lines = []
-                        for i, line in enumerate(lines):
-                            line_lower = line.lower()
-                            if any(keyword.lower() in line_lower for keyword in keywords if len(keyword) >= 2):
-                                keyword_lines.append(i)
-                        
-                        # 如果找到了包含关键字的行，优先显示这部分内容
-                        if keyword_lines and len(keyword_lines) > 0:
-                            # 获取第一个关键字出现的位置
-                            first_keyword_line = keyword_lines[0]
-                            
-                            # 计算要显示的行范围
-                            context_lines = 15  # 关键字前后显示的行数
-                            start_line = max(0, first_keyword_line - context_lines)
-                            end_line = min(len(lines), first_keyword_line + context_lines + 1)
-                            
-                            # 提取包含关键字的上下文
-                            preview_lines = lines[start_line:end_line]
-                            preview_text = '\n'.join(preview_lines)
-                            
-                            # 添加提示，表明内容被截断
-                            if start_line > 0:
-                                preview_text = "...(前面还有内容)\n" + preview_text
-                            if end_line < len(lines):
-                                preview_text += "\n...(后面还有内容)"
-                            
-                            # 标记此内容包含关键字
-                            content = preview_text
-                            content_has_keywords = True
-                            # 保存完整内容以便后续显示
-                            full_file_content = full_content
-                        else:
-                            # 如果没有找到关键字，按照原来的方式处理
-                            # 去除空行
-                            meaningful_lines = [line for line in lines if line.strip()]
-                            
-                            # 根据用户设置的最大显示行数提取内容
-                            if len(meaningful_lines) > max_display_lines:
-                                preview_lines = meaningful_lines[:max_display_lines]
-                                preview_text = '\n'.join(preview_lines)
-                                preview_text += "\n...(更多内容)"
-                                content_has_keywords = True  # 内容被截断，提供查看完整内容的选项
-                                full_file_content = full_content
-                            else:
-                                preview_text = full_content
-                                content_has_keywords = False
-                                full_file_content = None
-                            
-                            content = preview_text
+                        # 直接显示全部内容
+                        content = full_content
+                        content_has_keywords = True
+                        full_file_content = full_content
                 except Exception as e:
                     st.warning(f"读取原始文件时出错: {str(e)}，将使用向量数据库中的内容片段")
-                    content_has_keywords = False
-                    full_file_content = None
+                    # 即使读取出错，也标记为有关键字，以便显示查看完整内容按钮
+                    content_has_keywords = True
+                    # 使用向量数据库中的内容作为完整内容
+                    full_file_content = content
             else:
                 content_has_keywords = False
                 full_file_content = None
@@ -797,10 +936,10 @@ if query:
             # 定位关键字并获取上下文
             keyword_info = locate_keywords_in_text(content, keywords, context_lines=10)
             
-            # 为当前文件创建唯一ID
-            file_id = hashlib.md5(raw_path.encode()).hexdigest()
+            # 为当前文件创建唯一ID - 使用一致的方法
+            file_id = hashlib.md5(str(point.id).encode()).hexdigest()
             
-            # 初始化会话状态，如果不存在
+            # 确保文件ID在会话状态中存在
             if file_id not in st.session_state.show_full_content:
                 st.session_state.show_full_content[file_id] = False
             
@@ -862,17 +1001,27 @@ if query:
                         # 否则使用Streamlit的markdown组件
                         st.markdown(keyword_info["context_text"], unsafe_allow_html=True)
                     
-                    # 添加查看完整内容的按钮
-                    if st.button("查看完整内容", key=f"full_{file_id}"):
-                        st.session_state.show_full_content[file_id] = True
-                        st.session_state.current_file_id = file_id
-                        st.rerun()
+                    # 只在"优先使用原始文件内容"模式下显示"查看完整内容"按钮
+                    if use_original_file:
+                        # 定义按钮点击回调函数
+                        def on_view_full_click():
+                            st.session_state.show_full_content[file_id] = True
+                            st.session_state.current_file_id = file_id
+                            # 设置需要重新渲染的标志
+                            st.session_state.needs_rerun = True
+                        
+                        # 使用更复杂的唯一键，包含时间戳、随机数和索引
+                        timestamp = int(time.time())
+                        random_suffix = random.randint(100000, 999999)
+                        unique_button_key = f"view_full_{file_id}_{i}_{timestamp}_{random_suffix}"
+                        
+                        # 使用普通按钮，但添加on_click回调
+                        st.button("查看完整内容", key=unique_button_key, on_click=on_view_full_click)
                 
                 # 显示完整内容
-                elif st.session_state.show_full_content[file_id]:
+                elif st.session_state.show_full_content.get(file_id, False):
                     # 记录当前文件ID
-                    st.session_state.current_file_id = file_id
-                    
+                    st.session_state.current_file_id = file_id  # 确保记录当前文件ID
                     st.markdown("**📄 完整内容:**", unsafe_allow_html=True)
                     
                     # 确定要显示的内容
@@ -931,7 +1080,7 @@ if query:
                     #             st.rerun()
                 
                 # 如果原始文件内容被截断但没有找到关键字，提供查看完整内容的选项
-                elif content_has_keywords and full_file_content is not None and not st.session_state.show_full_content[file_id]:
+                elif content_has_keywords and full_file_content is not None and not st.session_state.show_full_content.get(file_id, False):
                     # 使用自定义Markdown渲染函数或Streamlit的markdown组件
                     if MARKDOWN_IT_AVAILABLE:
                         rendered_html = render_markdown_with_highlight(content, keywords)
@@ -961,11 +1110,22 @@ if query:
                     else:
                         st.markdown(content, unsafe_allow_html=True)
                     
-                    # 添加查看完整内容的按钮
-                    if st.button("查看完整内容", key=f"full_{file_id}"):
-                        st.session_state.show_full_content[file_id] = True
-                        st.session_state.current_file_id = file_id
-                        st.rerun()
+                    # 只在"优先使用原始文件内容"模式下显示"查看完整内容"按钮
+                    if use_original_file:
+                        # 定义按钮点击回调函数
+                        def on_view_full_click():
+                            st.session_state.show_full_content[file_id] = True
+                            st.session_state.current_file_id = file_id
+                            # 设置需要重新渲染的标志
+                            st.session_state.needs_rerun = True
+                        
+                        # 使用更复杂的唯一键，包含时间戳、随机数和索引
+                        timestamp = int(time.time())
+                        random_suffix = random.randint(100000, 999999)
+                        unique_button_key = f"view_full_{file_id}_{i}_{timestamp}_{random_suffix}"
+                        
+                        # 使用普通按钮，但添加on_click回调
+                        st.button("查看完整内容", key=unique_button_key, on_click=on_view_full_click)
                 
                 # 如果没有找到关键字，直接显示完整内容
                 else:
@@ -997,67 +1157,72 @@ if query:
                         st.components.v1.html(styled_html, height=content_height, scrolling=True)
                     else:
                         st.markdown(content, unsafe_allow_html=True)
-                
-                # 如果需要高亮关键词，添加JavaScript
-                if highlight_keywords and keywords and not MARKDOWN_IT_AVAILABLE:
-                    content_id = hashlib.md5(content.encode()).hexdigest()
                     
-                    highlight_js = f"""
-                    <script>
-                        document.addEventListener('DOMContentLoaded', function() {{
-                            const keywords = {str(keywords).lower()};
-                            if (!keywords || keywords.length === 0) return;
-                            
-                            // 查找所有文本节点
-                            function findTextNodes(node) {{
-                                const textNodes = [];
-                                if (node.nodeType === 3) {{ // 文本节点
-                                    textNodes.push(node);
-                                }} else if (node.nodeType === 1 && !['CODE', 'PRE'].includes(node.tagName)) {{
-                                    for (let i = 0; i < node.childNodes.length; i++) {{
-                                        textNodes.push(...findTextNodes(node.childNodes[i]));
-                                    }}
-                                }}
-                                return textNodes;
-                            }}
-                            
-                            // 获取所有Markdown内容的容器
-                            const containers = document.querySelectorAll('.stMarkdown');
-                            containers.forEach(container => {{
-                                const textNodes = findTextNodes(container);
+                    # 如果需要高亮关键词，添加JavaScript
+                    if highlight_keywords and keywords and not MARKDOWN_IT_AVAILABLE:
+                        content_id = hashlib.md5(content.encode()).hexdigest()
+                        
+                        highlight_js = f"""
+                        <script>
+                            document.addEventListener('DOMContentLoaded', function() {{
+                                const keywords = {str(keywords).lower()};
+                                if (!keywords || keywords.length === 0) return;
                                 
-                                // 高亮关键词
-                                textNodes.forEach(node => {{
-                                    let text = node.nodeValue;
-                                    let parent = node.parentNode;
-                                    let highlightedText = text;
-                                    let hasHighlight = false;
-                                    
-                                    keywords.forEach(keyword => {{
-                                        if (keyword.length < 2) return;
-                                        
-                                        const regex = new RegExp('\\\\b' + keyword + '\\\\b', 'gi');
-                                        highlightedText = highlightedText.replace(regex, match => {{
-                                            hasHighlight = true;
-                                            return `<span style="background-color: yellow; font-weight: bold;">${{match}}</span>`;
-                                        }});
-                                    }});
-                                    
-                                    if (hasHighlight) {{
-                                        const span = document.createElement('span');
-                                        span.innerHTML = highlightedText;
-                                        parent.replaceChild(span, node);
+                                // 查找所有文本节点
+                                function findTextNodes(node) {{
+                                    const textNodes = [];
+                                    if (node.nodeType === 3) {{ // 文本节点
+                                        textNodes.push(node);
+                                    }} else if (node.nodeType === 1 && !['CODE', 'PRE'].includes(node.tagName)) {{
+                                        for (let i = 0; i < node.childNodes.length; i++) {{
+                                            textNodes.push(...findTextNodes(node.childNodes[i]));
+                                        }}
                                     }}
+                                    return textNodes;
+                                }}
+                                
+                                // 获取所有Markdown内容的容器
+                                const containers = document.querySelectorAll('.stMarkdown');
+                                containers.forEach(container => {{
+                                    const textNodes = findTextNodes(container);
+                                    
+                                    // 高亮关键词
+                                    textNodes.forEach(node => {{
+                                        let text = node.nodeValue;
+                                        let parent = node.parentNode;
+                                        let highlightedText = text;
+                                        let hasHighlight = false;
+                                        
+                                        keywords.forEach(keyword => {{
+                                            if (keyword.length < 2) return;
+                                            
+                                            const regex = new RegExp('\\\\b' + keyword + '\\\\b', 'gi');
+                                            highlightedText = highlightedText.replace(regex, match => {{
+                                                hasHighlight = true;
+                                                return `<span style="background-color: yellow; font-weight: bold;">${{match}}</span>`;
+                                            }});
+                                        }});
+                                        
+                                        if (hasHighlight) {{
+                                            const span = document.createElement('span');
+                                            span.innerHTML = highlightedText;
+                                            parent.replaceChild(span, node);
+                                        }}
+                                    }});
                                 }});
                             }});
-                        }});
-                    </script>
-                    """
-                    
-                    st.components.v1.html(highlight_js, height=0)
+                        </script>
+                        """
+                        
+                        st.components.v1.html(highlight_js, height=0)
             
             # 添加分隔线
             st.markdown("---")
-        
+    
     else:
         st.warning("没有找到相关内容。")
+
+# 检查是否需要重新渲染页面
+if st.session_state.get('needs_rerun', False):
+    st.session_state.needs_rerun = False
+    st.rerun()
