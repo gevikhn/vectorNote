@@ -30,6 +30,7 @@ MD5_FILE_SIZE_THRESHOLD = 1024 * 1024 * 5  # 5MB，超过此大小的文件不�
 TOP_K = 20  # 初始检索结果数量
 RERANK_TOP_K = 8  # 重排序后保留的结果数量
 SCORE_THRESHOLD = 0.45  # 相似度阈值
+ENABLE_RERANKING = True  # 是否启用重排序功能
 
 # === UI配置 ===
 SHOW_OPEN_FILE_BUTTON = False  # 是否显示"打开文件"按钮

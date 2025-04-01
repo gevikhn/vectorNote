@@ -69,7 +69,7 @@ try:
     from config import (
         ROOT_DIR, COLLECTION_NAME, MODEL_NAME, RERANKER_MODEL_NAME,
         FORCE_CPU, OFFLINE_MODE, LOCAL_MODEL_PATH, LOCAL_RERANKER_PATH,
-        TOP_K, RERANK_TOP_K, SCORE_THRESHOLD,
+        TOP_K, RERANK_TOP_K, SCORE_THRESHOLD, ENABLE_RERANKING,
         set_offline_mode,
         SHOW_OPEN_FILE_BUTTON
     )
@@ -517,6 +517,9 @@ with st.sidebar.expander("🔧 高级选项"):
                                    help="自动修复可能被截断的Markdown语法，如代码块、链接等")
     sort_by_filename = st.checkbox("文件名匹配优先", value=True,
                                  help="如果文件名包含搜索关键词，则优先显示")
+    
+    # 添加重排序开关
+    enable_reranking = st.checkbox("启用重排序", value=ENABLE_RERANKING, help="启用后将使用重排序模型对搜索结果进行精确排序，可能会增加搜索时间")
 
 query = st.text_input("请输入你的问题或关键词：", "")
 
@@ -692,7 +695,7 @@ if query:
             search_points = search_result.points
             
             # 准备重排序 (第二阶段：重排序)
-            if reranker is not None:
+            if reranker is not None and enable_reranking:
                 with st.spinner("正在重排序结果..."):
                     # 确保搜索结果是可迭代的对象
                     if not hasattr(search_points, '__iter__'):
@@ -776,6 +779,12 @@ if query:
                                     except Exception as e:
                                         with st.sidebar:
                                             st.warning(f"更新分数时出错: {str(e)}")
+                            
+                            # 根据新的分数对结果进行排序
+                            search_points = sorted(search_points, key=lambda x: x.score, reverse=True)
+                            
+                            # 只保留前 RERANK_TOP_K 个结果
+                            search_points = search_points[:RERANK_TOP_K]
                     
                     except Exception as e:
                         with st.sidebar:
