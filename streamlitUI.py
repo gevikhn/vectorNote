@@ -493,9 +493,9 @@ default_config = {
     'top_k': 5,
     'score_threshold': 0.45,
     'highlight_keywords': True,
+    'apply_markdown_fix': True,
     'show_full_path': True,
     'use_original_file': False,
-    'apply_markdown_fix': True,
     'sort_by_filename': True,
     'enable_reranking': ENABLE_RERANKING
 }
@@ -548,9 +548,13 @@ score_threshold = st.sidebar.slider("相似度阈值", 0.0, 1.0,
                                   key='score_threshold',
                                   on_change=on_config_change('score_threshold'))
 
-highlight_keywords = st.sidebar.checkbox("高亮关键词", 
-                                       key='highlight_keywords',
-                                       on_change=on_config_change('highlight_keywords'))
+# 高亮关键词选项隐藏，但保持默认开启
+if 'highlight_keywords' not in st.session_state:
+    st.session_state.highlight_keywords = True
+
+# 修复截断的Markdown语法选项隐藏，但保持默认开启
+if 'apply_markdown_fix' not in st.session_state:
+    st.session_state.apply_markdown_fix = True
 
 show_full_path = st.sidebar.checkbox("显示完整文件路径", 
                                    key='show_full_path',
@@ -582,11 +586,6 @@ with st.sidebar.expander("🔧 高级选项"):
     
     # 更新上一次的状态
     st.session_state.previous_use_original_file = use_original_file
-    
-    apply_markdown_fix = st.checkbox("修复截断的Markdown语法", 
-                                   key='apply_markdown_fix',
-                                   help="自动修复可能被截断的Markdown语法，如代码块、链接等",
-                                   on_change=on_config_change('apply_markdown_fix'))
     
     sort_by_filename = st.checkbox("文件名匹配优先", 
                                  key='sort_by_filename',
