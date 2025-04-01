@@ -1008,6 +1008,7 @@ if query:
                     # 使用向量数据库中的内容作为完整内容
                     full_file_content = content
             else:
+                # 确保在所有代码路径中都定义了这些变量
                 content_has_keywords = False
                 full_file_content = None
             
