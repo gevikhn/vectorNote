@@ -70,7 +70,8 @@ try:
         ROOT_DIR, COLLECTION_NAME, MODEL_NAME, RERANKER_MODEL_NAME,
         FORCE_CPU, OFFLINE_MODE, LOCAL_MODEL_PATH, LOCAL_RERANKER_PATH,
         TOP_K, RERANK_TOP_K, SCORE_THRESHOLD,
-        set_offline_mode
+        set_offline_mode,
+        SHOW_OPEN_FILE_BUTTON
     )
     # 设置离线模式环境变量（不输出日志）
     if OFFLINE_MODE:
@@ -890,13 +891,15 @@ if query:
                 else:
                     st.markdown(f"**📎 文件名：** {abs_path.name}", unsafe_allow_html=True)
             with col2:
-                # 使用索引和文件路径组合作为唯一key
-                button_key = f"link_{i}_{abs_path.name.replace('.', '_')}"
-                if st.button("🔗 打开文件", key=button_key):
-                    # 使用系统默认方式打开文件
-                    success, error = open_file_with_app(str(abs_path))
-                    if not success:
-                        st.error(f"打开失败: {error}")
+                # 只在配置允许时显示打开文件按钮
+                if SHOW_OPEN_FILE_BUTTON:
+                    # 使用索引和文件路径组合作为唯一key
+                    button_key = f"link_{i}_{abs_path.name.replace('.', '_')}"
+                    if st.button("🔗 打开文件", key=button_key):
+                        # 使用系统默认方式打开文件
+                        success, error = open_file_with_app(str(abs_path))
+                        if not success:
+                            st.error(f"打开失败: {error}")
             
             # 显示相似度
             st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)

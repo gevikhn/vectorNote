@@ -31,6 +31,9 @@ TOP_K = 20  # 初始检索结果数量
 RERANK_TOP_K = 8  # 重排序后保留的结果数量
 SCORE_THRESHOLD = 0.45  # 相似度阈值
 
+# === UI配置 ===
+SHOW_OPEN_FILE_BUTTON = False  # 是否显示"打开文件"按钮
+
 # === 离线模式配置 ===
 OFFLINE_MODE = False  # 是否启用离线模式
 LOCAL_MODEL_PATH = "./models/bge-m3"  # 本地模型路径
