@@ -21,29 +21,6 @@ def custom_excepthook(exc_type, exc_value, exc_traceback):
 # 设置全局异常处理
 sys.excepthook = custom_excepthook
 
-# 尝试导入 torch 并设置异常处理
-try:
-    import torch
-    # 为 torch 模块添加特殊处理
-    original_getattr = torch.__class__.__getattr__
-    
-    def safe_getattr(self, name):
-        try:
-            return original_getattr(self, name)
-        except RuntimeError as e:
-            if "__path__._path" in str(e):
-                logger.warning("安全处理 torch 路径访问: %s", str(e))
-                return []
-            raise
-    
-    # 只在开发环境中应用这个修复
-    if "streamlit" in sys.modules:
-        torch.__class__.__getattr__ = safe_getattr
-except ImportError:
-    logger.info("torch 未安装，跳过相关修复")
-except Exception as e:
-    logger.warning("应用 torch 修复时出错: %s", str(e))
-
 # 必须是第一个 Streamlit 命令
 st.set_page_config(page_title="Obsidian 搜索", layout="wide")
 
@@ -672,9 +649,19 @@ def locate_keywords_in_text(text, keywords, context_lines=5):
         if any(keyword.lower() in line_lower for keyword in keywords if len(keyword) >= 2):
             keyword_lines.append(i)
     
-    # 如果没有找到关键字，返回原始文本
+    # 如果没有找到关键字，返回前10行文本
     if not keyword_lines:
-        return {"full_text": text, "has_keywords": False}
+        preview_lines = lines[:10]
+        preview_text = '\n'.join(preview_lines)
+        if len(lines) > 10:
+            preview_text += "\n..."
+        return {
+            "full_text": text,
+            "context_text": preview_text,
+            "has_keywords": False,
+            "start_line": 0,
+            "end_line": min(10, len(lines))
+        }
     
     # 获取第一个关键字出现的位置
     first_keyword_line = keyword_lines[0]
@@ -991,6 +978,7 @@ if query:
             st.markdown(f"**🔢 相似度：** `{round(hit.score, 4)}`", unsafe_allow_html=True)
             
             # 尝试读取原始文件以获取更完整的内容
+            content_has_keywords = False
             if st.session_state.use_original_file:
                 try:
                     if os.path.exists(raw_path):
@@ -998,8 +986,9 @@ if query:
                             full_content = f.read()
                         
                         # 直接显示全部内容
-                        content = full_content
-                        content_has_keywords = True
+                        keyword_info = locate_keywords_in_text(full_content, keywords)
+                        content = keyword_info["context_text"]
+                        content_has_keywords = True  # 即使没有找到关键字也显示"查看完整内容"按钮
                         full_file_content = full_content
                 except Exception as e:
                     st.warning(f"读取原始文件时出错: {str(e)}，将使用向量数据库中的内容片段")
