@@ -1,7 +1,9 @@
-FROM docdatabase:1.0
+FROM python:3.12.9-slim
 
 WORKDIR /app
 
+
+# 复制requirements文件并安装依赖到虚拟环境
 COPY requirements.txt .
 
 # 复制项目文件
@@ -11,9 +13,12 @@ COPY config.py .
 COPY scan_and_embed_notes.py .
 COPY note_index.json .
 
+# 复制数据目录
+COPY model/ ./model/
 COPY doc/ ./doc/
 COPY qdrant_data/ ./qdrant_data/
 
+# 使用国内镜像源并增加超时时间
 RUN pip config set global.timeout 300 && \
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \

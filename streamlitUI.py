@@ -4,6 +4,7 @@ import json
 import sys
 import logging
 import uuid
+import jieba  # 添加jieba导入
 
 # 设置日志记录
 logging.basicConfig(level=logging.INFO)
@@ -137,6 +138,17 @@ try:
         
         # 如果有关键词，进行高亮处理
         if keywords and len(keywords) > 0:
+            # 对关键词进行分词
+            segmented_keywords = []
+            for keyword in keywords:
+                if any(c.isalpha() for c in keyword):  # 如果包含字母（英文单词）
+                    segmented_keywords.append(keyword.lower())
+                else:  # 对中文进行分词
+                    segmented_keywords.extend(jieba.cut_for_search(keyword))
+            
+            # 过滤掉太短的分词结果
+            segmented_keywords = [kw for kw in segmented_keywords if len(kw) >= 2]
+            
             # 避免在代码块和标签内部进行高亮
             in_code_block = False
             in_tag = False
@@ -159,11 +171,10 @@ try:
                 elif not in_code_block and not in_tag:
                     # 检查是否是关键词开始
                     matched = False
-                    for word in keywords:
-                        if len(word) >= 2 and i + len(word) <= len(html):
-                            word_lower = word.lower()
+                    for word in segmented_keywords:  # 使用分词后的关键字列表
+                        if i + len(word) <= len(html):
                             text_to_check = html[i:i+len(word)].lower()
-                            if word_lower == text_to_check:
+                            if word == text_to_check:
                                 # 找到关键词，添加高亮
                                 result.append(f'<span style="background-color: yellow; font-weight: bold;">{html[i:i+len(word)]}</span>')
                                 i += len(word) - 1
@@ -639,6 +650,17 @@ def locate_keywords_in_text(text, keywords, context_lines=5):
     if not isinstance(text, str) or not keywords:
         return {"full_text": text, "has_keywords": False}
     
+    # 对每个关键字进行分词
+    segmented_keywords = []
+    for keyword in keywords:
+        if any(c.isalpha() for c in keyword):  # 如果包含字母（英文单词）
+            segmented_keywords.append(keyword.lower())
+        else:  # 对中文进行分词
+            segmented_keywords.extend(jieba.cut_for_search(keyword))
+    
+    # 过滤掉太短的分词结果（通常是单字或无意义的词）
+    segmented_keywords = [kw for kw in segmented_keywords if len(kw) >= 2]
+    
     # 将文本分割成行
     lines = text.split('\n')
     
@@ -646,7 +668,7 @@ def locate_keywords_in_text(text, keywords, context_lines=5):
     keyword_lines = []
     for i, line in enumerate(lines):
         line_lower = line.lower()
-        if any(keyword.lower() in line_lower for keyword in keywords if len(keyword) >= 2):
+        if any(keyword in line_lower for keyword in segmented_keywords):
             keyword_lines.append(i)
     
     # 如果没有找到关键字，返回前10行文本
@@ -715,10 +737,6 @@ def locate_keywords_in_text(text, keywords, context_lines=5):
         # 如果没有找到闭合的代码块标记，添加一个
         if not found_closing:
             final_text += "\n```"
-    
-    # 添加后缀
-    if suffix:
-        final_text += f"\n{suffix}"
     
     # 检查并修复可能的Markdown截断问题
     final_text = fix_truncated_markdown(final_text)
@@ -979,6 +997,7 @@ if query:
             
             # 尝试读取原始文件以获取更完整的内容
             content_has_keywords = False
+            full_file_content = None
             if st.session_state.use_original_file:
                 try:
                     if os.path.exists(raw_path):
@@ -986,8 +1005,8 @@ if query:
                             full_content = f.read()
                         
                         # 直接显示全部内容
-                        keyword_info = locate_keywords_in_text(full_content, keywords)
-                        content = keyword_info["context_text"]
+                        # keyword_info = locate_keywords_in_text(full_content, keywords)
+                        content = full_content
                         content_has_keywords = True  # 即使没有找到关键字也显示"查看完整内容"按钮
                         full_file_content = full_content
                 except Exception as e:
@@ -1162,8 +1181,8 @@ if query:
                 elif content_has_keywords and full_file_content is not None and not st.session_state.show_full_content.get(file_id, False):
                     # 使用自定义Markdown渲染函数或Streamlit的markdown组件
                     if MARKDOWN_IT_AVAILABLE:
-                        rendered_html = render_markdown_with_highlight(content, keywords)
-                        content_height = max(300, len(content.split('\n')) * 20)
+                        rendered_html = render_markdown_with_highlight(keyword_info["context_text"], keywords)
+                        content_height = max(300, len(keyword_info["context_text"].split('\n')) * 20)
                         styled_html = f"""
                         <style>
                         .markdown-content {{
@@ -1210,8 +1229,8 @@ if query:
                 else:
                     # 使用自定义Markdown渲染函数或Streamlit的markdown组件
                     if MARKDOWN_IT_AVAILABLE:
-                        rendered_html = render_markdown_with_highlight(content, keywords)
-                        content_height = max(300, len(content.split('\n')) * 20)
+                        rendered_html = render_markdown_with_highlight(keyword_info["context_text"], keywords)
+                        content_height = max(300, len(keyword_info["context_text"].split('\n')) * 20)
                         styled_html = f"""
                         <style>
                         .markdown-content {{
